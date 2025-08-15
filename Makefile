@@ -1,258 +1,668 @@
 #
-# Copyright (c) 2018 Western Digital Corporation or its affiliates.
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2019 Western Digital Corporation or its affiliates.
 #
 # Authors:
 #   Anup Patel <anup.patel@wdc.com>
 #
-# SPDX-License-Identifier: BSD-2-Clause
-#
-
-# Current Version
-MAJOR = 0
-MINOR = 1
 
 # Select Make Options:
-# o  Do not use make's built-in rules and variables
+# o  Do not use make's built-in rules
 # o  Do not print "Entering directory ...";
-MAKEFLAGS += -rR --no-print-directory
+MAKEFLAGS += -r --no-print-directory
+
+# Readlink -f requires GNU readlink
+ifeq ($(shell uname -s),Darwin)
+READLINK ?= greadlink
+else
+READLINK ?= readlink
+endif
 
 # Find out source, build, and install directories
 src_dir=$(CURDIR)
 ifdef O
- build_dir=$(shell readlink -f $(O))
+ build_dir=$(shell $(READLINK) -f $(O))
 else
  build_dir=$(CURDIR)/build
 endif
 ifeq ($(build_dir),$(CURDIR))
 $(error Build directory is same as source directory.)
 endif
+install_root_dir_default=$(CURDIR)/install
 ifdef I
- install_dir=$(shell readlink -f $(I))
+ install_root_dir=$(shell $(READLINK) -f $(I))
 else
- install_dir=$(CURDIR)/install
+ install_root_dir=$(install_root_dir_default)/usr
 endif
-ifeq ($(install_dir),$(CURDIR))
-$(error Install directory is same as source directory.)
+ifeq ($(install_root_dir),$(CURDIR))
+$(error Install root directory is same as source directory.)
 endif
-ifeq ($(install_dir),$(build_dir))
-$(error Install directory is same as build directory.)
+ifeq ($(install_root_dir),$(build_dir))
+$(error Install root directory is same as build directory.)
+endif
+ifdef PLATFORM_DIR
+  platform_dir_path=$(shell $(READLINK) -f $(PLATFORM_DIR))
+  ifdef PLATFORM
+    platform_parent_dir=$(platform_dir_path)
+  else
+    PLATFORM=$(shell basename $(platform_dir_path))
+    platform_parent_dir=$(shell realpath ${platform_dir_path}/..)
+  endif
+else
+ platform_parent_dir=$(src_dir)/platform
+endif
+ifndef PLATFORM_DEFCONFIG
+PLATFORM_DEFCONFIG=defconfig
 endif
 
 # Check if verbosity is ON for build process
-VERBOSE_DEFAULT    := 0
 CMD_PREFIX_DEFAULT := @
-ifdef VERBOSE
-	ifeq ("$(origin VERBOSE)", "command line")
-		VB := $(VERBOSE)
-	else
-		VB := $(VERBOSE_DEFAULT)
-	endif
+ifeq ($(V), 1)
+	CMD_PREFIX :=
 else
-	VB := $(VERBOSE_DEFAULT)
-endif
-ifeq ($(VB), 1)
-	override V :=
-else
-	override V := $(CMD_PREFIX_DEFAULT)
+	CMD_PREFIX := $(CMD_PREFIX_DEFAULT)
 endif
 
 # Setup path of directories
-export plat_subdir=plat/$(PLAT)
-export plat_dir=$(CURDIR)/$(plat_subdir)
-export plat_common_dir=$(CURDIR)/plat/common
+export platform_subdir=$(PLATFORM)
+export platform_src_dir=$(platform_parent_dir)/$(platform_subdir)
+export platform_build_dir=$(build_dir)/platform/$(platform_subdir)
 export include_dir=$(CURDIR)/include
-export lib_dir=$(CURDIR)/lib
-export blob_dir=$(CURDIR)/blob
+export libsbi_dir=$(CURDIR)/lib/sbi
+export libsbiutils_dir=$(CURDIR)/lib/utils
+export firmware_dir=$(CURDIR)/firmware
+
+# Setup variables for kconfig
+ifdef PLATFORM
+export PYTHONDONTWRITEBYTECODE=1
+export KCONFIG_DIR=$(platform_build_dir)/kconfig
+export KCONFIG_AUTOLIST=$(KCONFIG_DIR)/auto.list
+export KCONFIG_AUTOHEADER=$(KCONFIG_DIR)/autoconf.h
+export KCONFIG_AUTOCONFIG=$(KCONFIG_DIR)/auto.conf
+export KCONFIG_AUTOCMD=$(KCONFIG_DIR)/auto.conf.cmd
+export KCONFIG_CONFIG=$(KCONFIG_DIR)/.config
+# Additional exports for include paths in Kconfig files
+export OPENSBI_SRC_DIR=$(src_dir)
+export OPENSBI_PLATFORM=$(PLATFORM)
+export OPENSBI_PLATFORM_SRC_DIR=$(platform_src_dir)
+endif
+
+# Find library version
+OPENSBI_VERSION_MAJOR=`grep "define OPENSBI_VERSION_MAJOR" $(include_dir)/sbi/sbi_version.h | sed 's/.*MAJOR.*\([0-9][0-9]*\)/\1/'`
+OPENSBI_VERSION_MINOR=`grep "define OPENSBI_VERSION_MINOR" $(include_dir)/sbi/sbi_version.h | sed 's/.*MINOR.*\([0-9][0-9]*\)/\1/'`
+OPENSBI_VERSION_GIT=
+
+# Detect 'git' presence before issuing 'git' commands
+GIT_AVAIL=$(shell command -v git 2> /dev/null)
+ifneq ($(GIT_AVAIL),)
+GIT_DIR=$(shell git rev-parse --git-dir 2> /dev/null)
+ifneq ($(GIT_DIR),)
+OPENSBI_VERSION_GIT=$(shell if [ -d $(GIT_DIR) ]; then git describe 2> /dev/null; fi)
+endif
+endif
+
+# Setup compilation commands
+ifneq ($(LLVM),)
+CC		=	clang
+AR		=	llvm-ar
+LD		=	ld.lld
+OBJCOPY		=	llvm-objcopy
+else
+ifdef CROSS_COMPILE
+CC		=	$(CROSS_COMPILE)gcc
+AR		=	$(CROSS_COMPILE)ar
+LD		=	$(CROSS_COMPILE)ld
+OBJCOPY		=	$(CROSS_COMPILE)objcopy
+else
+CC		?=	gcc
+AR		?=	ar
+LD		?=	ld
+OBJCOPY		?=	objcopy
+endif
+endif
+CPP		=	$(CC) -E
+AS		=	$(CC)
+DTC		=	dtc
+
+ifneq ($(shell $(CC) --version 2>&1 | head -n 1 | grep clang),)
+CC_IS_CLANG	=	y
+else
+CC_IS_CLANG	=	n
+endif
+
+ifneq ($(shell $(LD) --version 2>&1 | head -n 1 | grep LLD),)
+LD_IS_LLD	=	y
+else
+LD_IS_LLD	=	n
+endif
+
+ifeq ($(CC_IS_CLANG),y)
+ifneq ($(CROSS_COMPILE),)
+CLANG_TARGET	=	--target=$(notdir $(CROSS_COMPILE:%-=%))
+endif
+endif
+
+# Guess the compiler's XLEN
+OPENSBI_CC_XLEN := $(shell TMP=`$(CC) $(CLANG_TARGET) -dumpmachine | sed 's/riscv\([0-9][0-9]\).*/\1/'`; echo $${TMP})
+
+# Guess the compiler's ABI and ISA
+ifneq ($(CC_IS_CLANG),y)
+OPENSBI_CC_ABI := $(shell TMP=`$(CC) -v 2>&1 | sed -n 's/.*\(with\-abi=\([a-zA-Z0-9]*\)\).*/\2/p'`; echo $${TMP})
+OPENSBI_CC_ISA := $(shell TMP=`$(CC) -v 2>&1 | sed -n 's/.*\(with\-arch=\([a-zA-Z0-9]*\)\).*/\2/p'`; echo $${TMP})
+endif
+
+# Setup platform XLEN
+ifndef PLATFORM_RISCV_XLEN
+  ifeq ($(OPENSBI_CC_XLEN), 32)
+    PLATFORM_RISCV_XLEN = 32
+  else
+    PLATFORM_RISCV_XLEN = 64
+  endif
+endif
+
+ifeq ($(CC_IS_CLANG),y)
+ifeq ($(CROSS_COMPILE),)
+CLANG_TARGET	=	--target=riscv$(PLATFORM_RISCV_XLEN)-unknown-elf
+endif
+endif
+
+ifeq ($(LD_IS_LLD),y)
+RELAX_FLAG	=	-mno-relax
+USE_LD_FLAG	=	-fuse-ld=lld
+else
+USE_LD_FLAG	=	-fuse-ld=bfd
+endif
+
+# Check whether the linker supports creating PIEs
+OPENSBI_LD_PIE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) $(USE_LD_FLAG) -fPIE -nostdlib -Wl,-pie -x c /dev/null -o /dev/null >/dev/null 2>&1 && echo y || echo n)
+
+# Check whether the linker supports --exclude-libs
+OPENSBI_LD_EXCLUDE_LIBS := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) $(USE_LD_FLAG) "-Wl,--exclude-libs,ALL" -x c /dev/null -o /dev/null >/dev/null 2>&1 && echo y || echo n)
+
+# Check whether the compiler supports -m(no-)save-restore
+CC_SUPPORT_SAVE_RESTORE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -mno-save-restore -x c /dev/null -o /dev/null 2>&1 | grep -e "-save-restore" >/dev/null && echo n || echo y)
+
+# Check whether the compiler supports -m(no-)strict-align
+CC_SUPPORT_STRICT_ALIGN := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -mstrict-align -x c /dev/null -o /dev/null 2>&1 | grep -e "-mstrict-align" -e "-mno-unaligned-access" >/dev/null && echo n || echo y)
+
+# Check whether the assembler and the compiler support the Zicsr and Zifencei extensions
+CC_SUPPORT_ZICSR_ZIFENCEI := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -march=rv$(OPENSBI_CC_XLEN)imafd_zicsr_zifencei -x c /dev/null -o /dev/null 2>&1 | grep -e "zicsr" -e "zifencei" > /dev/null && echo n || echo y)
+
+# Check whether the assembler and the compiler support the Vector extension
+CC_SUPPORT_VECT := $(shell echo | $(CC) -dM -E -march=rv$(OPENSBI_CC_XLEN)gv - | grep -q riscv.*vector && echo y || echo n)
+
+ifneq ($(OPENSBI_LD_PIE),y)
+$(error Your linker does not support creating PIEs, opensbi requires this.)
+endif
+
+# Build Info:
+# OPENSBI_BUILD_TIME_STAMP -- the compilation time stamp
+# OPENSBI_BUILD_COMPILER_VERSION -- the compiler version info
+BUILD_INFO ?= n
+ifeq ($(BUILD_INFO),y)
+OPENSBI_BUILD_DATE_FMT = +%Y-%m-%d %H:%M:%S %z
+ifdef SOURCE_DATE_EPOCH
+	OPENSBI_BUILD_TIME_STAMP ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" \
+		"$(OPENSBI_BUILD_DATE_FMT)" 2>/dev/null || \
+		date -u -r "$(SOURCE_DATE_EPOCH)" \
+		"$(OPENSBI_BUILD_DATE_FMT)" 2>/dev/null || \
+		date -u "$(OPENSBI_BUILD_DATE_FMT)")
+else
+	OPENSBI_BUILD_TIME_STAMP ?= $(shell date "$(OPENSBI_BUILD_DATE_FMT)")
+endif
+OPENSBI_BUILD_COMPILER_VERSION=$(shell $(CC) -v 2>&1 | grep ' version ' | \
+	sed 's/[[:space:]]*$$//')
+endif
 
 # Setup list of objects.mk files
-ifdef PLAT
-plat-object-mks=$(shell if [ -d $(plat_dir) ]; then find $(plat_dir) -iname "objects.mk" | sort -r; fi)
-plat-common-object-mks=$(shell if [ -d $(plat_common_dir) ]; then find $(plat_common_dir) -iname "objects.mk" | sort -r; fi)
+ifdef PLATFORM
+platform-object-mks=$(shell if [ -d $(platform_src_dir)/ ]; then find $(platform_src_dir) -iname "objects.mk" | sort -r; fi)
 endif
-lib-object-mks=$(shell if [ -d $(lib_dir) ]; then find $(lib_dir) -iname "objects.mk" | sort -r; fi)
-blob-object-mks=$(shell if [ -d $(blob_dir) ]; then find $(blob_dir) -iname "objects.mk" | sort -r; fi)
+libsbi-object-mks=$(shell if [ -d $(libsbi_dir) ]; then find $(libsbi_dir) -iname "objects.mk" | sort -r; fi)
+libsbiutils-object-mks=$(shell if [ -d $(libsbiutils_dir) ]; then find $(libsbiutils_dir) -iname "objects.mk" | sort -r; fi)
+firmware-object-mks=$(shell if [ -d $(firmware_dir) ]; then find $(firmware_dir) -iname "objects.mk" | sort -r; fi)
 
-# Include platform specifig config.mk
-ifdef PLAT
-include $(plat_dir)/config.mk
+# The "make all" rule should always be first rule
+.PHONY: all
+all:
+
+# Include platform specific .config
+ifdef PLATFORM
+.PHONY: menuconfig
+menuconfig: $(platform_src_dir)/Kconfig $(src_dir)/Kconfig
+	$(CMD_PREFIX)mkdir -p $(KCONFIG_DIR)
+	$(CMD_PREFIX)$(src_dir)/scripts/Kconfiglib/menuconfig.py $(src_dir)/Kconfig
+
+.PHONY: savedefconfig
+savedefconfig: $(platform_src_dir)/Kconfig $(src_dir)/Kconfig
+	$(CMD_PREFIX)mkdir -p $(KCONFIG_DIR)
+	$(CMD_PREFIX)$(src_dir)/scripts/Kconfiglib/savedefconfig.py --kconfig $(src_dir)/Kconfig --out $(KCONFIG_DIR)/defconfig
+
+$(KCONFIG_CONFIG): $(platform_src_dir)/configs/$(PLATFORM_DEFCONFIG)
+	$(CMD_PREFIX)mkdir -p $(KCONFIG_DIR)
+	$(CMD_PREFIX)$(src_dir)/scripts/Kconfiglib/defconfig.py --kconfig $(src_dir)/Kconfig $(platform_src_dir)/configs/$(PLATFORM_DEFCONFIG)
+
+$(KCONFIG_AUTOCONFIG): $(KCONFIG_CONFIG)
+	$(CMD_PREFIX)$(src_dir)/scripts/Kconfiglib/genconfig.py --header-path $(KCONFIG_AUTOHEADER) --sync-deps $(KCONFIG_DIR) --file-list $(KCONFIG_AUTOLIST) $(src_dir)/Kconfig
+
+$(KCONFIG_AUTOHEADER): $(KCONFIG_AUTOCONFIG);
+
+$(KCONFIG_AUTOLIST): $(KCONFIG_AUTOCONFIG);
+
+$(KCONFIG_AUTOCMD): $(KCONFIG_AUTOLIST)
+	$(CMD_PREFIX)printf "%s: " $(KCONFIG_CONFIG) > $(KCONFIG_AUTOCMD)
+	$(CMD_PREFIX)cat $(KCONFIG_AUTOLIST) | tr '\n' ' ' >> $(KCONFIG_AUTOCMD)
+
+include $(KCONFIG_AUTOCONFIG)
+include $(KCONFIG_AUTOCMD)
 endif
 
-# Include all object.mk files
-ifdef PLAT
-include $(plat-object-mks)
-include $(plat-common-object-mks)
+# Include all objects.mk files
+ifdef PLATFORM
+include $(platform-object-mks)
 endif
-include $(lib-object-mks)
-include $(blob-object-mks)
+include $(libsbi-object-mks)
+include $(libsbiutils-object-mks)
+include $(firmware-object-mks)
 
 # Setup list of objects
-lib-objs-path-y=$(foreach obj,$(lib-objs-y),$(build_dir)/lib/$(obj))
-ifdef PLAT
-plat-objs-path-y=$(foreach obj,$(plat-objs-y),$(build_dir)/$(plat_subdir)/$(obj))
-plat-common-objs-path-y=$(foreach obj,$(plat-common-objs-y),$(build_dir)/plat/common/$(obj))
-blob-bins-path-y=$(foreach bin,$(blob-bins-y),$(build_dir)/$(plat_subdir)/blob/$(bin))
+libsbi-objs-path-y=$(foreach obj,$(libsbi-objs-y),$(build_dir)/lib/sbi/$(obj))
+ifdef PLATFORM
+libsbiutils-objs-path-y=$(foreach obj,$(libsbiutils-objs-y),$(platform_build_dir)/lib/utils/$(obj))
+platform-objs-path-y=$(foreach obj,$(platform-objs-y),$(platform_build_dir)/$(obj))
+firmware-bins-path-y=$(foreach bin,$(firmware-bins-y),$(platform_build_dir)/firmware/$(bin))
 endif
-blob-elfs-path-y=$(blob-bins-path-y:.bin=.elf)
-blob-objs-path-y=$(blob-bins-path-y:.bin=.o)
+firmware-elfs-path-y=$(firmware-bins-path-y:.bin=.elf)
+firmware-objs-path-y=$(firmware-bins-path-y:.bin=.o)
 
 # Setup list of deps files for objects
-deps-y=$(plat-objs-path-y:.o=.dep)
-deps-y+=$(plat-common-objs-path-y:.o=.dep)
-deps-y+=$(lib-objs-path-y:.o=.dep)
-deps-y+=$(blob-objs-path-y:.o=.dep)
+deps-y=$(platform-objs-path-y:.o=.dep)
+deps-y+=$(libsbi-objs-path-y:.o=.dep)
+deps-y+=$(libsbiutils-objs-path-y:.o=.dep)
+deps-y+=$(firmware-objs-path-y:.o=.dep)
+deps-y+=$(firmware-elfs-path-y:=.dep)
 
-# Setup compilation environment
-cpp=$(CROSS_COMPILE)cpp
-cppflags+=-DOPENSBI_MAJOR=$(MAJOR)
-cppflags+=-DOPENSBI_MINOR=$(MINOR)
-cppflags+=-I$(plat_dir)/include
-cppflags+=-I$(plat_common_dir)/include
-cppflags+=-I$(include_dir)
-cppflags+=$(plat-cppflags-y)
-cppflags+=$(blob-cppflags-y)
-cc=$(CROSS_COMPILE)gcc
-cflags=-g -Wall -Werror -nostdlib -fno-strict-aliasing -O2
-cflags+=-fno-omit-frame-pointer -fno-optimize-sibling-calls
-cflags+=-mno-save-restore -mstrict-align
-cflags+=$(cppflags)
-cflags+=$(plat-cflags-y)
-cflags+=$(blob-cflags-y)
-cflags+=$(EXTRA_CFLAGS)
-as=$(CROSS_COMPILE)gcc
-asflags=-g -Wall -nostdlib -D__ASSEMBLY__
-asflags+=-fno-omit-frame-pointer -fno-optimize-sibling-calls
-asflags+=-mno-save-restore -mstrict-align
-asflags+=$(cppflags)
-asflags+=$(plat-asflags-y)
-asflags+=$(blob-asflags-y)
-asflags+=$(EXTRA_ASFLAGS)
-ar=$(CROSS_COMPILE)ar
-arflags=rcs
-ld=$(CROSS_COMPILE)gcc
-ldflags=-g -Wall -nostdlib -Wl,--build-id=none
-ldflags+=$(plat-ldflags-y)
-ldflags+=$(blob-ldflags-y)
-merge=$(CROSS_COMPILE)ld
-mergeflags=-r
-objcopy=$(CROSS_COMPILE)objcopy
+# Setup platform ABI, ISA and Code Model
+ifndef PLATFORM_RISCV_ABI
+  ifneq ($(PLATFORM_RISCV_TOOLCHAIN_DEFAULT), 1)
+    ifeq ($(PLATFORM_RISCV_XLEN), 32)
+      PLATFORM_RISCV_ABI = ilp$(PLATFORM_RISCV_XLEN)
+    else
+      PLATFORM_RISCV_ABI = lp$(PLATFORM_RISCV_XLEN)
+    endif
+  else
+    PLATFORM_RISCV_ABI = $(OPENSBI_CC_ABI)
+  endif
+endif
+ifndef PLATFORM_RISCV_ISA
+  ifneq ($(PLATFORM_RISCV_TOOLCHAIN_DEFAULT), 1)
+    PLATFORM_RISCV_ISA := rv$(PLATFORM_RISCV_XLEN)imafdc
+    ifeq ($(CC_SUPPORT_VECT), y)
+      PLATFORM_RISCV_ISA := $(PLATFORM_RISCV_ISA)v
+    endif
+    ifeq ($(CC_SUPPORT_ZICSR_ZIFENCEI), y)
+      PLATFORM_RISCV_ISA := $(PLATFORM_RISCV_ISA)_zicsr_zifencei
+    endif
+  else
+    PLATFORM_RISCV_ISA = $(OPENSBI_CC_ISA)
+  endif
+endif
+ifndef PLATFORM_RISCV_CODE_MODEL
+  PLATFORM_RISCV_CODE_MODEL = medany
+endif
+
+# Setup install directories
+ifdef INSTALL_INCLUDE_PATH
+	install_include_path=$(INSTALL_INCLUDE_PATH)
+else
+	install_include_path=include
+endif
+ifdef INSTALL_LIB_PATH
+	install_lib_path=$(INSTALL_LIB_PATH)
+else
+	ifneq ($(origin INSTALL_LIB_SUBDIR), undefined)
+		install_lib_subdir=$(INSTALL_LIB_SUBDIR)
+	else
+		install_lib_subdir=$(PLATFORM_RISCV_ABI)
+	endif
+	install_lib_path=lib$(subst 32,,$(PLATFORM_RISCV_XLEN))/$(install_lib_subdir)
+endif
+ifdef INSTALL_FIRMWARE_PATH
+	install_firmware_path=$(INSTALL_FIRMWARE_PATH)
+else
+	install_firmware_path=share/opensbi/$(PLATFORM_RISCV_ABI)
+endif
+ifdef INSTALL_DOCS_PATH
+	install_docs_path=$(INSTALL_DOCS_PATH)
+else
+	install_docs_path=share/opensbi/docs
+endif
+
+# Setup compilation commands flags
+ifeq ($(CC_IS_CLANG),y)
+GENFLAGS	+=	$(CLANG_TARGET)
+GENFLAGS	+=	-Wno-unused-command-line-argument
+endif
+GENFLAGS	+=	-I$(platform_src_dir)/include
+GENFLAGS	+=	-I$(include_dir)
+ifneq ($(OPENSBI_VERSION_GIT),)
+GENFLAGS	+=	-DOPENSBI_VERSION_GIT="\"$(OPENSBI_VERSION_GIT)\""
+endif
+ifeq ($(BUILD_INFO),y)
+GENFLAGS	+=	-DOPENSBI_BUILD_TIME_STAMP="\"$(OPENSBI_BUILD_TIME_STAMP)\""
+GENFLAGS	+=	-DOPENSBI_BUILD_COMPILER_VERSION="\"$(OPENSBI_BUILD_COMPILER_VERSION)\""
+endif
+ifdef PLATFORM
+GENFLAGS	+=	-include $(KCONFIG_AUTOHEADER)
+endif
+GENFLAGS	+=	$(libsbiutils-genflags-y)
+GENFLAGS	+=	$(platform-genflags-y)
+GENFLAGS	+=	$(firmware-genflags-y)
+
+CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing -ffunction-sections -fdata-sections
+CFLAGS		+=	-fno-omit-frame-pointer -fno-optimize-sibling-calls
+# Optionally supported flags
+ifeq ($(CC_SUPPORT_SAVE_RESTORE),y)
+CFLAGS		+=	-mno-save-restore
+endif
+ifeq ($(CC_SUPPORT_STRICT_ALIGN),y)
+CFLAGS		+=	-mstrict-align
+endif
+CFLAGS		+=	-mabi=$(PLATFORM_RISCV_ABI) -march=$(PLATFORM_RISCV_ISA)
+CFLAGS		+=	-mcmodel=$(PLATFORM_RISCV_CODE_MODEL)
+CFLAGS		+=	$(RELAX_FLAG)
+CFLAGS		+=	$(GENFLAGS)
+CFLAGS		+=	$(platform-cflags-y)
+CFLAGS		+=	-fPIE -pie
+CFLAGS		+=	$(firmware-cflags-y)
+
+CPPFLAGS	+=	$(GENFLAGS)
+CPPFLAGS	+=	$(platform-cppflags-y)
+CPPFLAGS	+=	$(firmware-cppflags-y)
+
+ASFLAGS		=	-g -Wall -nostdlib
+ASFLAGS		+=	-fno-omit-frame-pointer -fno-optimize-sibling-calls
+ASFLAGS		+=	-fPIE
+# Optionally supported flags
+ifeq ($(CC_SUPPORT_SAVE_RESTORE),y)
+ASFLAGS		+=	-mno-save-restore
+endif
+ifeq ($(CC_SUPPORT_STRICT_ALIGN),y)
+ASFLAGS		+=	-mstrict-align
+endif
+ASFLAGS		+=	-mabi=$(PLATFORM_RISCV_ABI) -march=$(PLATFORM_RISCV_ISA)
+ASFLAGS		+=	-mcmodel=$(PLATFORM_RISCV_CODE_MODEL)
+ASFLAGS		+=	$(RELAX_FLAG)
+ifneq ($(CC_IS_CLANG),y)
+ifneq ($(RELAX_FLAG),)
+ASFLAGS		+=	-Wa,$(RELAX_FLAG)
+endif
+endif
+ASFLAGS		+=	$(GENFLAGS)
+ASFLAGS		+=	$(platform-asflags-y)
+ASFLAGS		+=	$(firmware-asflags-y)
+
+ARFLAGS		=	rcs
+
+ELFFLAGS	+=	$(USE_LD_FLAG)
+ELFFLAGS	+=	-Wl,--gc-sections
+ifeq ($(OPENSBI_LD_EXCLUDE_LIBS),y)
+ELFFLAGS	+=	-Wl,--exclude-libs,ALL
+endif
+ELFFLAGS	+=	-Wl,--build-id=none
+ELFFLAGS	+=	-Wl,--no-dynamic-linker -Wl,-pie
+ELFFLAGS	+=	$(platform-ldflags-y)
+ELFFLAGS	+=	$(firmware-ldflags-y)
+
+MERGEFLAGS	+=	-r
+ifeq ($(LD_IS_LLD),y)
+MERGEFLAGS	+=	-b elf
+else
+MERGEFLAGS	+=	-b elf$(PLATFORM_RISCV_XLEN)-littleriscv
+endif
+MERGEFLAGS	+=	-m elf$(PLATFORM_RISCV_XLEN)lriscv
+
+DTSCPPFLAGS	=	$(CPPFLAGS) -nostdinc -nostdlib -fno-builtin -D__DTS__ -x assembler-with-cpp
+
+ifneq ($(DEBUG),)
+CFLAGS		+=	-O0
+ELFFLAGS	+=	-Wl,--print-gc-sections
+else
+CFLAGS		+=	-O2
+endif
 
 # Setup functions for compilation
 define dynamic_flags
 -I$(shell dirname $(2)) -D__OBJNAME__=$(subst -,_,$(shell basename $(1) .o))
 endef
-merge_objs = $(V)mkdir -p `dirname $(1)`; \
+merge_objs = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " MERGE     $(subst $(build_dir)/,,$(1))"; \
-	     $(merge) $(mergeflags) $(2) -o $(1)
-merge_deps = $(V)mkdir -p `dirname $(1)`; \
+	     $(LD) $(MERGEFLAGS) $(2) -o $(1)
+merge_deps = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " MERGE-DEP $(subst $(build_dir)/,,$(1))"; \
 	     cat $(2) > $(1)
-copy_file =  $(V)mkdir -p `dirname $(1)`; \
+copy_file =  $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " COPY      $(subst $(build_dir)/,,$(1))"; \
-	     cp -f $(2) $(1)
-inst_file =  $(V)mkdir -p `dirname $(1)`; \
-	     echo " INSTALL   $(subst $(install_dir)/,,$(1))"; \
-	     cp -f $(2) $(1)
-inst_file_list = $(V)if [ ! -z "$(3)" ]; then \
-	     mkdir -p $(1); \
-	     for f in $(3) ; do \
-	     echo " INSTALL   "$(2)"/"`basename $$f`; \
-	     cp -f $$f $(1); \
+	     cp -L -f $(2) $(1)
+inst_file =  $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " INSTALL   $(subst $(install_root_dir)/,,$(1))"; \
+	     cp -L -f $(2) $(1)
+inst_file_list = $(CMD_PREFIX)if [ ! -z "$(4)" ]; then \
+	     mkdir -p $(1)/$(3); \
+	     for file in $(4) ; do \
+	     rel_file=`echo $$file | sed -e 's@$(2)/$(subst $(install_firmware_path),platform,$(3))@@'`; \
+	     dest_file=$(1)"/"$(3)"/"`echo $$rel_file`; \
+	     dest_dir=`dirname $$dest_file`; \
+	     echo " INSTALL   "$(3)"/"`echo $$rel_file`; \
+	     mkdir -p $$dest_dir; \
+	     cp -L -f $$file $$dest_file; \
 	     done \
 	     fi
-inst_header_dir =  $(V)mkdir -p $(1); \
-	     echo " INSTALL   $(subst $(install_dir)/,,$(1))"; \
-	     cp -rf $(2) $(1)
-compile_cpp = $(V)mkdir -p `dirname $(1)`; \
+inst_header_dir =  $(CMD_PREFIX)mkdir -p $(1); \
+	     echo " INSTALL   $(subst $(install_root_dir)/,,$(1))"; \
+	     cp -L -rf $(2) $(1)
+compile_cpp_dep = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " CPP-DEP   $(subst $(build_dir)/,,$(1))"; \
+	     printf %s `dirname $(1)`/  > $(1) && \
+	     $(CC) $(CPPFLAGS) -x c -MM $(3) \
+	       -MT `basename $(1:.dep=$(2))` >> $(1) || rm -f $(1)
+compile_cpp = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " CPP       $(subst $(build_dir)/,,$(1))"; \
-	     $(cpp) $(cppflags) $(2) | grep -v "\#" > $(1)
-compile_cc_dep = $(V)mkdir -p `dirname $(1)`; \
+	     $(CPP) $(CPPFLAGS) -x c $(2) | grep -v "\#" > $(1)
+compile_cc_dep = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " CC-DEP    $(subst $(build_dir)/,,$(1))"; \
-	     echo -n `dirname $(1)`/ > $(1) && \
-	     $(cc) $(cflags) $(call dynamic_flags,$(1),$(2))   \
+	     printf %s `dirname $(1)`/  > $(1) && \
+	     $(CC) $(CFLAGS) $(call dynamic_flags,$(1),$(2))   \
 	       -MM $(2) >> $(1) || rm -f $(1)
-compile_cc = $(V)mkdir -p `dirname $(1)`; \
+compile_cc = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " CC        $(subst $(build_dir)/,,$(1))"; \
-	     $(cc) $(cflags) $(call dynamic_flags,$(1),$(2)) -c $(2) -o $(1)
-compile_as_dep = $(V)mkdir -p `dirname $(1)`; \
+	     $(CC) $(CFLAGS) $(call dynamic_flags,$(1),$(2)) -c $(2) -o $(1)
+compile_as_dep = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " AS-DEP    $(subst $(build_dir)/,,$(1))"; \
-	     echo -n `dirname $(1)`/ > $(1) && \
-	     $(as) $(asflags) $(call dynamic_flags,$(1),$(2))  \
+	     printf %s `dirname $(1)`/ > $(1) && \
+	     $(AS) $(ASFLAGS) $(call dynamic_flags,$(1),$(2)) \
 	       -MM $(2) >> $(1) || rm -f $(1)
-compile_as = $(V)mkdir -p `dirname $(1)`; \
+compile_as = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " AS        $(subst $(build_dir)/,,$(1))"; \
-	     $(as) $(asflags) $(call dynamic_flags,$(1),$(2)) -c $(2) -o $(1)
-compile_ld = $(V)mkdir -p `dirname $(1)`; \
-	     echo " LD        $(subst $(build_dir)/,,$(1))"; \
-	     $(ld) $(3) $(ldflags) -Wl,-T$(2) -o $(1)
-compile_ar = $(V)mkdir -p `dirname $(1)`; \
+	     $(AS) $(ASFLAGS) $(call dynamic_flags,$(1),$(2)) -c $(2) -o $(1)
+compile_elf = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " ELF       $(subst $(build_dir)/,,$(1))"; \
+	     $(CC) $(CFLAGS) $(3) $(ELFFLAGS) -Wl,-T$(2) -o $(1)
+compile_ar = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " AR        $(subst $(build_dir)/,,$(1))"; \
-	     $(ar) $(arflags) $(1) $(2)
-compile_objcopy = $(V)mkdir -p `dirname $(1)`; \
+	     $(AR) $(ARFLAGS) $(1) $(2)
+compile_objcopy = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " OBJCOPY   $(subst $(build_dir)/,,$(1))"; \
-	     $(objcopy) -S -O binary $(2) $(1)
+	     $(OBJCOPY) -S -O binary $(2) $(1)
+compile_dts = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " DTC       $(subst $(build_dir)/,,$(1))"; \
+	     $(CPP) $(DTSCPPFLAGS) $(2) | $(DTC) -O dtb -i `dirname $(2)` -o $(1)
+compile_d2c = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " D2C       $(subst $(build_dir)/,,$(1))"; \
+	     $(if $($(2)-varalign-$(3)),$(eval D2C_ALIGN_BYTES := $($(2)-varalign-$(3))),$(eval D2C_ALIGN_BYTES := $(4))) \
+	     $(if $($(2)-varprefix-$(3)),$(eval D2C_NAME_PREFIX := $($(2)-varprefix-$(3))),$(eval D2C_NAME_PREFIX := $(5))) \
+	     $(if $($(2)-padding-$(3)),$(eval D2C_PADDING_BYTES := $($(2)-padding-$(3))),$(eval D2C_PADDING_BYTES := 0)) \
+	     $(src_dir)/scripts/d2c.sh -i $(6) -a $(D2C_ALIGN_BYTES) -p $(D2C_NAME_PREFIX) -t $(D2C_PADDING_BYTES) > $(1)
+compile_carray = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " CARRAY    $(subst $(build_dir)/,,$(1))"; \
+	     $(eval CARRAY_VAR_LIST := $(carray-$(subst .carray.c,,$(shell basename $(1)))-y)) \
+	     $(src_dir)/scripts/carray.sh -i $(2) -l "$(CARRAY_VAR_LIST)" > $(1)
+compile_gen_dep = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " GEN-DEP   $(subst $(build_dir)/,,$(1))"; \
+	     echo "$(1:.dep=$(2)): $(3)" >> $(1)
 
 targets-y  = $(build_dir)/lib/libsbi.a
-ifdef PLAT
-targets-y += $(build_dir)/$(plat_subdir)/lib/libplatsbi.a
+ifdef PLATFORM
+targets-y += $(platform_build_dir)/lib/libplatsbi.a
 endif
-targets-y += $(blob-bins-path-y)
+targets-y += $(firmware-bins-path-y)
 
-# Default rule "make" should always be first rule
+# The default "make all" rule
 .PHONY: all
 all: $(targets-y)
 
 # Preserve all intermediate files
 .SECONDARY:
 
-$(build_dir)/%.bin: $(build_dir)/%.elf
-	$(call compile_objcopy,$@,$<)
-
-$(build_dir)/%.elf: $(build_dir)/%.o $(build_dir)/%.elf.ld $(build_dir)/$(plat_subdir)/lib/libplatsbi.a
-	$(call compile_ld,$@,$@.ld,$< $(build_dir)/$(plat_subdir)/lib/libplatsbi.a)
-
-$(build_dir)/$(plat_subdir)/%.ld: $(src_dir)/%.ldS
-	$(call compile_cpp,$@,$<)
-
-$(build_dir)/lib/libsbi.a: $(lib-objs-path-y)
+# Rules for lib/sbi sources
+$(build_dir)/lib/libsbi.a: $(libsbi-objs-path-y)
 	$(call compile_ar,$@,$^)
 
-$(build_dir)/$(plat_subdir)/lib/libplatsbi.a: $(lib-objs-path-y) $(plat-common-objs-path-y) $(plat-objs-path-y)
+$(platform_build_dir)/lib/libplatsbi.a: $(libsbi-objs-path-y) $(libsbiutils-objs-path-y) $(platform-objs-path-y)
 	$(call compile_ar,$@,$^)
 
-$(build_dir)/%.dep: $(src_dir)/%.c
+$(build_dir)/%.dep: $(src_dir)/%.carray $(KCONFIG_AUTOHEADER)
+	$(call compile_gen_dep,$@,.c,$< $(KCONFIG_AUTOHEADER))
+	$(call compile_gen_dep,$@,.o,$(@:.dep=.c))
+
+$(build_dir)/%.carray.c: $(src_dir)/%.carray $(src_dir)/scripts/carray.sh
+	$(call compile_carray,$@,$<)
+
+$(build_dir)/%.dep: $(src_dir)/%.c $(KCONFIG_AUTOHEADER)
 	$(call compile_cc_dep,$@,$<)
 
 $(build_dir)/%.o: $(src_dir)/%.c
 	$(call compile_cc,$@,$<)
 
-$(build_dir)/%.dep: $(src_dir)/%.S
+$(build_dir)/%.o: $(build_dir)/%.c
+	$(call compile_cc,$@,$<)
+
+ifeq ($(BUILD_INFO),y)
+$(build_dir)/lib/sbi/sbi_init.o: $(libsbi_dir)/sbi_init.c FORCE
+	$(call compile_cc,$@,$<)
+endif
+
+$(build_dir)/%.dep: $(src_dir)/%.S $(KCONFIG_AUTOHEADER)
 	$(call compile_as_dep,$@,$<)
 
 $(build_dir)/%.o: $(src_dir)/%.S
 	$(call compile_as,$@,$<)
 
-$(build_dir)/$(plat_subdir)/%.dep: $(src_dir)/%.c
+# Rules for platform sources
+$(platform_build_dir)/%.dep: $(platform_src_dir)/%.carray $(KCONFIG_AUTOHEADER)
+	$(call compile_gen_dep,$@,.c,$< $(KCONFIG_AUTOHEADER))
+	$(call compile_gen_dep,$@,.o,$(@:.dep=.c))
+
+$(platform_build_dir)/%.carray.c: $(platform_src_dir)/%.carray $(src_dir)/scripts/carray.sh
+	$(call compile_carray,$@,$<)
+
+$(platform_build_dir)/%.dep: $(platform_src_dir)/%.c $(KCONFIG_AUTOHEADER)
 	$(call compile_cc_dep,$@,$<)
 
-$(build_dir)/$(plat_subdir)/%.o: $(src_dir)/%.c
+$(platform_build_dir)/%.o: $(platform_src_dir)/%.c $(KCONFIG_AUTOHEADER)
 	$(call compile_cc,$@,$<)
 
-$(build_dir)/$(plat_subdir)/%.dep: $(src_dir)/%.S
+$(platform_build_dir)/%.dep: $(platform_src_dir)/%.S
 	$(call compile_as_dep,$@,$<)
 
-$(build_dir)/$(plat_subdir)/%.o: $(src_dir)/%.S
+$(platform_build_dir)/%.o: $(platform_src_dir)/%.S
 	$(call compile_as,$@,$<)
 
-# Dependency files should only be included after default Makefile rule
+$(platform_build_dir)/%.dep: $(platform_src_dir)/%.dts $(KCONFIG_AUTOHEADER)
+	$(call compile_gen_dep,$@,.dtb,$< $(KCONFIG_AUTOHEADER))
+	$(call compile_gen_dep,$@,.c,$(@:.dep=.dtb))
+	$(call compile_gen_dep,$@,.o,$(@:.dep=.c))
+
+$(platform_build_dir)/%.c: $(platform_build_dir)/%.dtb
+	$(call compile_d2c,$@,platform,$(subst .dtb,.o,$(subst /,-,$(subst $(platform_build_dir)/,,$<))),16,dt,$<)
+
+$(platform_build_dir)/%.dtb: $(platform_src_dir)/%.dts
+	$(call compile_dts,$@,$<)
+
+# Rules for lib/utils and firmware sources
+$(platform_build_dir)/%.bin: $(platform_build_dir)/%.elf
+	$(call compile_objcopy,$@,$<)
+
+$(platform_build_dir)/%.elf: $(platform_build_dir)/%.o $(platform_build_dir)/%.elf.ld $(platform_build_dir)/lib/libplatsbi.a
+	$(call compile_elf,$@,$@.ld,$< $(platform_build_dir)/lib/libplatsbi.a)
+
+$(platform_build_dir)/%.dep: $(src_dir)/%.ldS $(KCONFIG_AUTOHEADER)
+	$(call compile_cpp_dep,$@,.ld,$<)
+
+$(platform_build_dir)/%.ld: $(src_dir)/%.ldS
+	$(call compile_cpp,$@,$<)
+
+$(platform_build_dir)/%.dep: $(src_dir)/%.carray $(KCONFIG_AUTOHEADER)
+	$(call compile_gen_dep,$@,.c,$< $(KCONFIG_AUTOHEADER))
+	$(call compile_gen_dep,$@,.o,$(@:.dep=.c))
+
+$(platform_build_dir)/%.carray.c: $(src_dir)/%.carray $(src_dir)/scripts/carray.sh
+	$(call compile_carray,$@,$<)
+
+$(platform_build_dir)/%.dep: $(src_dir)/%.c $(KCONFIG_AUTOHEADER)
+	$(call compile_cc_dep,$@,$<)
+
+$(platform_build_dir)/%.o: $(src_dir)/%.c
+	$(call compile_cc,$@,$<)
+
+$(platform_build_dir)/%.dep: $(src_dir)/%.S $(KCONFIG_AUTOHEADER)
+	$(call compile_as_dep,$@,$<)
+
+$(platform_build_dir)/%.o: $(src_dir)/%.S
+	$(call compile_as,$@,$<)
+
+# Rule for "make docs"
+$(build_dir)/docs/latex/refman.pdf: $(build_dir)/docs/latex/refman.tex
+	$(CMD_PREFIX)mkdir -p $(build_dir)/docs
+	$(CMD_PREFIX)$(MAKE) -C $(build_dir)/docs/latex
+$(build_dir)/docs/latex/refman.tex: $(build_dir)/docs/doxygen.cfg
+	$(CMD_PREFIX)mkdir -p $(build_dir)/docs
+	$(CMD_PREFIX)doxygen $(build_dir)/docs/doxygen.cfg
+$(build_dir)/docs/doxygen.cfg: $(src_dir)/docs/doxygen.cfg
+	$(CMD_PREFIX)mkdir -p $(build_dir)/docs
+	$(CMD_PREFIX)cat docs/doxygen.cfg | sed -e "s#@@SRC_DIR@@#$(src_dir)#" -e "s#@@BUILD_DIR@@#$(build_dir)#" -e "s#@@OPENSBI_MAJOR@@#$(OPENSBI_VERSION_MAJOR)#" -e "s#@@OPENSBI_MINOR@@#$(OPENSBI_VERSION_MINOR)#" > $(build_dir)/docs/doxygen.cfg
+.PHONY: docs
+docs: $(build_dir)/docs/latex/refman.pdf
+
+# Dependency files should only be included after default Makefile rules
 # They should not be included for any "xxxconfig" or "xxxclean" rule
 all-deps-1 = $(if $(findstring config,$(MAKECMDGOALS)),,$(deps-y))
 all-deps-2 = $(if $(findstring clean,$(MAKECMDGOALS)),,$(all-deps-1))
 -include $(all-deps-2)
 
+# Include external dependency of firmwares after default Makefile rules
+include $(src_dir)/firmware/external_deps.mk
+
+# Convenient "make run" command for emulated platforms
+.PHONY: run
+run: all
+ifneq ($(platform-runcmd),)
+	$(platform-runcmd) $(RUN_ARGS)
+else
+ifdef PLATFORM
+	@echo "Platform $(PLATFORM) doesn't specify a run command"
+	@false
+else
+	@echo Run command only available when targeting a platform
+	@false
+endif
+endif
+
 install_targets-y  = install_libsbi
-ifdef PLAT
+ifdef PLATFORM
 install_targets-y += install_libplatsbi
-install_targets-y += install_blobs
+install_targets-y += install_firmwares
 endif
 
 # Rule for "make install"
@@ -261,36 +671,66 @@ install: $(install_targets-y)
 
 .PHONY: install_libsbi
 install_libsbi: $(build_dir)/lib/libsbi.a
-	$(call inst_header_dir,$(install_dir)/include,$(include_dir)/sbi)
-	$(call inst_file,$(install_dir)/lib/libsbi.a,$(build_dir)/lib/libsbi.a)
+	$(call inst_header_dir,$(install_root_dir)/$(install_include_path),$(include_dir)/sbi)
+	$(call inst_file,$(install_root_dir)/$(install_lib_path)/libsbi.a,$(build_dir)/lib/libsbi.a)
 
 .PHONY: install_libplatsbi
-install_libplatsbi: $(build_dir)/$(plat_subdir)/lib/libplatsbi.a $(build_dir)/lib/libsbi.a
-	$(call inst_header_dir,$(install_dir)/$(plat_subdir)/include,$(include_dir)/sbi)
-	$(call inst_file,$(install_dir)/$(plat_subdir)/lib/libplatsbi.a,$(build_dir)/$(plat_subdir)/lib/libplatsbi.a)
+install_libplatsbi: $(platform_build_dir)/lib/libplatsbi.a $(build_dir)/lib/libsbi.a
+	$(call inst_file,$(install_root_dir)/$(install_lib_path)/opensbi/$(platform_subdir)/lib/libplatsbi.a,$(platform_build_dir)/lib/libplatsbi.a)
 
-.PHONY: install_blobs
-install_blobs: $(build_dir)/$(plat_subdir)/lib/libplatsbi.a $(build_dir)/lib/libsbi.a $(blob-bins-path-y)
-	$(call inst_file_list,$(install_dir)/$(plat_subdir)/blob,$(plat_subdir)/blob,$(blob-elfs-path-y))
-	$(call inst_file_list,$(install_dir)/$(plat_subdir)/blob,$(plat_subdir)/blob,$(blob-bins-path-y))
+.PHONY: install_firmwares
+install_firmwares: $(platform_build_dir)/lib/libplatsbi.a $(build_dir)/lib/libsbi.a $(firmware-bins-path-y)
+	$(call inst_file_list,$(install_root_dir),$(build_dir),$(install_firmware_path)/$(platform_subdir)/firmware,$(firmware-elfs-path-y))
+	$(call inst_file_list,$(install_root_dir),$(build_dir),$(install_firmware_path)/$(platform_subdir)/firmware,$(firmware-bins-path-y))
+
+.PHONY: install_docs
+install_docs: $(build_dir)/docs/latex/refman.pdf
+	$(call inst_file,$(install_root_dir)/$(install_docs_path)/refman.pdf,$(build_dir)/docs/latex/refman.pdf)
+
+.PHONY: cscope
+cscope:
+	$(CMD_PREFIX)find \
+		"$(src_dir)/firmware" \
+		"$(src_dir)/include" \
+		"$(src_dir)/lib" \
+		"$(platform_src_dir)" \
+	-name "*.[chS]" -print > cscope.files
+	$(CMD_PREFIX)echo "$(KCONFIG_AUTOHEADER)" >> cscope.files
+	$(CMD_PREFIX)cscope -bkq -i cscope.files -f cscope.out
 
 # Rule for "make clean"
 .PHONY: clean
 clean:
-ifeq ($(build_dir),$(CURDIR)/build)
-	$(V)mkdir -p $(build_dir)
-	$(if $(V), @echo " CLEAN     $(build_dir)")
-	$(V)find $(build_dir) -maxdepth 1 -type f -exec rm -rf {} +
-endif
+	$(CMD_PREFIX)mkdir -p $(build_dir)
+	$(if $(V), @echo " RM        $(build_dir)/*.o")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.o" -exec rm -rf {} +
+	$(if $(V), @echo " RM        $(build_dir)/*.carray.c")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.carray.c" -exec rm -rf {} +
+	$(if $(V), @echo " RM        $(build_dir)/*.a")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.a" -exec rm -rf {} +
+	$(if $(V), @echo " RM        $(build_dir)/*.elf")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.elf" -exec rm -rf {} +
+	$(if $(V), @echo " RM        $(build_dir)/*.bin")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.bin" -exec rm -rf {} +
+	$(if $(V), @echo " RM        $(build_dir)/*.dtb")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.dtb" -exec rm -rf {} +
 
 # Rule for "make distclean"
 .PHONY: distclean
-distclean:
+distclean: clean
+	$(CMD_PREFIX)mkdir -p $(build_dir)
+	$(if $(V), @echo " RM        $(build_dir)/*.dep")
+	$(CMD_PREFIX)find $(build_dir) -type f -name "*.dep" -exec rm -rf {} +
 ifeq ($(build_dir),$(CURDIR)/build)
 	$(if $(V), @echo " RM        $(build_dir)")
-	$(V)rm -rf $(build_dir)
+	$(CMD_PREFIX)rm -rf $(build_dir)
 endif
-ifeq ($(install_dir),$(CURDIR)/install)
-	$(if $(V), @echo " RM        $(install_dir)")
-	$(V)rm -rf $(install_dir)
+ifeq ($(install_root_dir),$(install_root_dir_default)/usr)
+	$(if $(V), @echo " RM        $(install_root_dir_default)")
+	$(CMD_PREFIX)rm -rf $(install_root_dir_default)
 endif
+	$(if $(V), @echo " RM        $(src_dir)/cscope*")
+	$(CMD_PREFIX)rm -f $(src_dir)/cscope*
+
+.PHONY: FORCE
+FORCE:

@@ -1,16 +1,20 @@
 /*
- * Copyright (c) 2018 Western Digital Corporation or its affiliates.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2019 Western Digital Corporation or its affiliates.
  *
  * Authors:
  *   Anup Patel <anup.patel@wdc.com>
- *
- * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #ifndef __RISCV_ASM_H__
 #define __RISCV_ASM_H__
 
-#ifdef __ASSEMBLY__
+#include <sbi/riscv_encoding.h>
+
+/* clang-format off */
+
+#ifdef __ASSEMBLER__
 #define __ASM_STR(x)	x
 #else
 #define __ASM_STR(x)	#x
@@ -24,13 +28,17 @@
 #error "Unexpected __riscv_xlen"
 #endif
 
+#define PAGE_SHIFT	(12)
+#define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
+#define PAGE_MASK	(~(PAGE_SIZE - 1))
+
 #define REG_L		__REG_SEL(ld, lw)
 #define REG_S		__REG_SEL(sd, sw)
 #define SZREG		__REG_SEL(8, 4)
 #define LGREG		__REG_SEL(3, 2)
 
 #if __SIZEOF_POINTER__ == 8
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define RISCV_PTR		.dword
 #define RISCV_SZPTR		8
 #define RISCV_LGPTR		3
@@ -40,7 +48,7 @@
 #define RISCV_LGPTR		"3"
 #endif
 #elif __SIZEOF_POINTER__ == 4
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define RISCV_PTR		.word
 #define RISCV_SZPTR		4
 #define RISCV_LGPTR		2
@@ -69,176 +77,130 @@
 #error "Unexpected __SIZEOF_SHORT__"
 #endif
 
-#define RISCV_SCRATCH_TMP0_OFFSET		(0 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_FW_START_OFFSET		(1 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_FW_SIZE_OFFSET		(2 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_NEXT_ARG1_OFFSET		(3 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_NEXT_ADDR_OFFSET		(4 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_NEXT_MODE_OFFSET		(5 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_WARMBOOT_ADDR_OFFSET	(6 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_PLATFORM_ADDR_OFFSET	(7 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_HARTID_TO_SCRATCH_OFFSET	(8 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_IPI_TYPE_OFFSET		(9 * __SIZEOF_POINTER__)
-#define RISCV_SCRATCH_SIZE			256
+/* clang-format on */
 
-#define RISCV_TRAP_REGS_zero			0
-#define RISCV_TRAP_REGS_ra			1
-#define RISCV_TRAP_REGS_sp			2
-#define RISCV_TRAP_REGS_gp			3
-#define RISCV_TRAP_REGS_tp			4
-#define RISCV_TRAP_REGS_t0			5
-#define RISCV_TRAP_REGS_t1			6
-#define RISCV_TRAP_REGS_t2			7
-#define RISCV_TRAP_REGS_s0			8
-#define RISCV_TRAP_REGS_s1			9
-#define RISCV_TRAP_REGS_a0			10
-#define RISCV_TRAP_REGS_a1			11
-#define RISCV_TRAP_REGS_a2			12
-#define RISCV_TRAP_REGS_a3			13
-#define RISCV_TRAP_REGS_a4			14
-#define RISCV_TRAP_REGS_a5			15
-#define RISCV_TRAP_REGS_a6			16
-#define RISCV_TRAP_REGS_a7			17
-#define RISCV_TRAP_REGS_s2			18
-#define RISCV_TRAP_REGS_s3			19
-#define RISCV_TRAP_REGS_s4			20
-#define RISCV_TRAP_REGS_s5			21
-#define RISCV_TRAP_REGS_s6			22
-#define RISCV_TRAP_REGS_s7			23
-#define RISCV_TRAP_REGS_s8			24
-#define RISCV_TRAP_REGS_s9			25
-#define RISCV_TRAP_REGS_s10			26
-#define RISCV_TRAP_REGS_s11			27
-#define RISCV_TRAP_REGS_t3			28
-#define RISCV_TRAP_REGS_t4			29
-#define RISCV_TRAP_REGS_t5			30
-#define RISCV_TRAP_REGS_t6			31
-#define RISCV_TRAP_REGS_mepc			32
-#define RISCV_TRAP_REGS_mstatus			33
-#define RISCV_TRAP_REGS_last			34
+#ifndef __ASSEMBLER__
 
-#define RISCV_TRAP_REGS_OFFSET(x)		\
-				((RISCV_TRAP_REGS_##x) * __SIZEOF_POINTER__)
-#define RISCV_TRAP_REGS_SIZE			RISCV_TRAP_REGS_OFFSET(last)
+#define csr_swap(csr, val)                                              \
+	({                                                              \
+		unsigned long __v = (unsigned long)(val);               \
+		__asm__ __volatile__("csrrw %0, " __ASM_STR(csr) ", %1" \
+				     : "=r"(__v)                        \
+				     : "rK"(__v)                        \
+				     : "memory");                       \
+		__v;                                                    \
+	})
 
-#ifndef __ASSEMBLY__
+#define csr_read(csr)                                           \
+	({                                                      \
+		register unsigned long __v;                     \
+		__asm__ __volatile__("csrr %0, " __ASM_STR(csr) \
+				     : "=r"(__v)                \
+				     :                          \
+				     : "memory");               \
+		__v;                                            \
+	})
 
-#define csr_swap(csr, val)					\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrrw %0, " #csr ", %1"		\
-			      : "=r" (__v) : "rK" (__v)		\
-			      : "memory");			\
-	__v;							\
-})
+/* Variant of csr_read() that allows the compiler to cache the value. */
+#define csr_read_relaxed(csr)                                     \
+	({                                                        \
+		register unsigned long __v;                       \
+		__asm__ ("csrr %0, " __ASM_STR(csr) : "=r"(__v)); \
+		__v;                                              \
+	})
 
-#define csr_read(csr)						\
-({								\
-	register unsigned long __v;				\
-	__asm__ __volatile__ ("csrr %0, " #csr			\
-			      : "=r" (__v) :			\
-			      : "memory");			\
-	__v;							\
-})
+#define csr_write(csr, val)                                        \
+	({                                                         \
+		unsigned long __v = (unsigned long)(val);          \
+		__asm__ __volatile__("csrw " __ASM_STR(csr) ", %0" \
+				     :                             \
+				     : "rK"(__v)                   \
+				     : "memory");                  \
+	})
 
-#define csr_read_n(csr_num)					\
-({								\
-	register unsigned long __v;				\
-	__asm__ __volatile__ ("csrr %0, " __ASM_STR(csr_num)	\
-			      : "=r" (__v) :			\
-			      : "memory");			\
-	__v;							\
-})
+#define csr_read_set(csr, val)                                          \
+	({                                                              \
+		unsigned long __v = (unsigned long)(val);               \
+		__asm__ __volatile__("csrrs %0, " __ASM_STR(csr) ", %1" \
+				     : "=r"(__v)                        \
+				     : "rK"(__v)                        \
+				     : "memory");                       \
+		__v;                                                    \
+	})
 
-#define csr_write(csr, val)					\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrw " #csr ", %0"		\
-			      : : "rK" (__v)			\
-			      : "memory");			\
-})
+#define csr_set(csr, val)                                          \
+	({                                                         \
+		unsigned long __v = (unsigned long)(val);          \
+		__asm__ __volatile__("csrs " __ASM_STR(csr) ", %0" \
+				     :                             \
+				     : "rK"(__v)                   \
+				     : "memory");                  \
+	})
 
-#define csr_write_n(csr_num, val)				\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrw " __ASM_STR(csr_num) ", %0"	\
-			      : : "rK" (__v)			\
-			      : "memory");			\
-})
+#define csr_read_clear(csr, val)                                        \
+	({                                                              \
+		unsigned long __v = (unsigned long)(val);               \
+		__asm__ __volatile__("csrrc %0, " __ASM_STR(csr) ", %1" \
+				     : "=r"(__v)                        \
+				     : "rK"(__v)                        \
+				     : "memory");                       \
+		__v;                                                    \
+	})
 
-#define csr_read_set(csr, val)					\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrrs %0, " #csr ", %1"		\
-			      : "=r" (__v) : "rK" (__v)		\
-			      : "memory");			\
-	__v;							\
-})
-
-#define csr_set(csr, val)					\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrs " #csr ", %0"		\
-			      : : "rK" (__v)			\
-			      : "memory");			\
-})
-
-#define csr_read_clear(csr, val)				\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrrc %0, " #csr ", %1"		\
-			      : "=r" (__v) : "rK" (__v)		\
-			      : "memory");			\
-	__v;							\
-})
-
-#define csr_clear(csr, val)					\
-({								\
-	unsigned long __v = (unsigned long)(val);		\
-	__asm__ __volatile__ ("csrc " #csr ", %0"		\
-			      : : "rK" (__v)			\
-			      : "memory");			\
-})
+#define csr_clear(csr, val)                                        \
+	({                                                         \
+		unsigned long __v = (unsigned long)(val);          \
+		__asm__ __volatile__("csrc " __ASM_STR(csr) ", %0" \
+				     :                             \
+				     : "rK"(__v)                   \
+				     : "memory");                  \
+	})
 
 unsigned long csr_read_num(int csr_num);
 
 void csr_write_num(int csr_num, unsigned long val);
 
-#define wfi()							\
-do {								\
-	__asm__ __volatile__ ("wfi" ::: "memory");		\
-} while (0)
+#define wfi()                                             \
+	do {                                              \
+		__asm__ __volatile__("wfi" ::: "memory"); \
+	} while (0)
 
-static inline int misa_extension(char ext)
-{
-	return csr_read(misa) & (1 << (ext - 'A'));
-}
+#define ebreak()                                             \
+	do {                                              \
+		__asm__ __volatile__("ebreak" ::: "memory"); \
+	} while (0)
 
-static inline int misa_xlen(void)
-{
-	return ((long)csr_read(misa) < 0) ? 64 : 32;
-}
+/* Get current HART id */
+#define current_hartid()	((unsigned int)csr_read_relaxed(CSR_MHARTID))
 
-static inline void misa_string(char *out, unsigned int out_sz)
-{
-	unsigned long i, val = csr_read(misa);
+/* determine CPU extension, return non-zero support */
+int misa_extension_imp(char ext);
 
-	for (i = 0; i < 26; i++) {
-		if (val & (1 << i)) {
-			*out = 'A' + i;
-			out++;
-		}
-	}
-	*out = '\0';
-	out++;
-}
+#define misa_extension(c)\
+({\
+	_Static_assert(((c >= 'A') && (c <= 'Z')),\
+		"The parameter of misa_extension must be [A-Z]");\
+	misa_extension_imp(c);\
+})
 
-int pmp_set(unsigned int n, unsigned long prot,
-	    unsigned long addr, unsigned long log2len);
+/* Get MXL field of misa, return -1 on error */
+int misa_xlen(void);
 
-int pmp_get(unsigned int n, unsigned long *prot_out,
-	    unsigned long *addr_out, unsigned long *log2len_out);
+/* Get RISC-V ISA string representation */
+void misa_string(int xlen, char *out, unsigned int out_sz);
 
-#endif /* !__ASSEMBLY__ */
+/* Disable pmp entry at a given index */
+int pmp_disable(unsigned int n);
+
+/* Check if the matching field is set */
+int is_pmp_entry_mapped(unsigned long entry);
+
+int pmp_set(unsigned int n, unsigned long prot, unsigned long addr,
+	    unsigned long log2len);
+
+int pmp_get(unsigned int n, unsigned long *prot_out, unsigned long *addr_out,
+	    unsigned long *log2len);
+
+#endif /* !__ASSEMBLER__ */
 
 #endif

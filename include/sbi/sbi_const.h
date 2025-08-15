@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2018 Western Digital Corporation or its affiliates.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2019 Western Digital Corporation or its affiliates.
  *
  * Authors:
  *   Anup Patel <anup.patel@wdc.com>
- *
- * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #ifndef __SBI_CONST_H__
 #define __SBI_CONST_H__
 
-/* Some constant macros are used in both assembler and
+/*
+ * Some constant macros are used in both assembler and
  * C code.  Therefore we cannot annotate them always with
  * 'UL' and other type specifiers unilaterally.  We
  * use the following macros to deal with this.
@@ -19,7 +20,9 @@
  * leave it unchanged in asm.
  */
 
-#ifdef __ASSEMBLY__
+/* clang-format off */
+
+#ifdef __ASSEMBLER__
 #define _AC(X,Y)	X
 #define _AT(T,X)	X
 #else
@@ -37,7 +40,9 @@
 #define UL(x)		(_UL(x))
 #define ULL(x)		(_ULL(x))
 
-#define	__STR(s)	#s
-#define	STRINGIFY(s)	__STR(s)
+#define __STR(s)	#s
+#define STRINGIFY(s)	__STR(s)
+
+/* clang-format on */
 
 #endif
