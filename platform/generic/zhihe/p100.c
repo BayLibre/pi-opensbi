@@ -67,15 +67,14 @@ static void init_csrs(void)
 	}
 }
 
-static int zhihe_p100_early_init(bool cold_boot,
-				 const void *fdt, const struct fdt_match *match)
+static bool zhihe_p100_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
 {
-	if (cold_boot)
-		return 0;
+	if (hartid == 0)
+		return true;
 
 	init_csrs();
 
-	return 0;
+	return false;
 }
 
 /*
@@ -156,7 +155,7 @@ static const struct fdt_match zhihe_p100_match[] = {
 
 const struct platform_override zhihe_p100 = {
 	.match_table = zhihe_p100_match,
-	.early_init = zhihe_p100_early_init,
+	.cold_boot_allowed = zhihe_p100_cold_boot_allowed,
 	.final_init = zhihe_p100_final_init,
 	.extensions_init	= zhihe_p100_extensions_init,
 };
