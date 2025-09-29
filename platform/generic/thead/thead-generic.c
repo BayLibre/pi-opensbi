@@ -64,16 +64,18 @@ static void init_csrs(bool cold_boot)
 	}
 }
 
-static int thead_generic_early_init(bool cold_boot, const void *fdt,
-				    const struct fdt_match *match)
+static bool thead_generic_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
 {
 	struct thead_generic_quirks *quirks = (void *)match->data;
+	bool cold_boot;
 
 	if (quirks->errata & THEAD_QUIRK_ERRATA_TLB_FLUSH)
 		thead_register_tlb_flush_trap_handler();
 
+	cold_boot = (hartid == 0);
 	init_csrs(cold_boot);
-	return 0;
+
+	return cold_boot;
 }
 
 static int thead_generic_extensions_init(const struct fdt_match *match,
@@ -111,6 +113,6 @@ static const struct fdt_match thead_generic_match[] = {
 
 const struct platform_override thead_generic = {
 	.match_table		= thead_generic_match,
-	.early_init		= thead_generic_early_init,
+	.cold_boot_allowed 	= thead_generic_cold_boot_allowed,
 	.extensions_init	= thead_generic_extensions_init,
 };

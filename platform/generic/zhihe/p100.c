@@ -149,6 +149,7 @@ static int zhihe_p100_extensions_init(const struct fdt_match *match,
 }
 
 static const struct fdt_match zhihe_p100_match[] = {
+	{ .compatible = "zhihe,a210" },
 	{ .compatible = "zhihe,p100" },
 	{ },
 };
