@@ -10,6 +10,7 @@
 #include <sbi/sbi_types.h>
 
 struct sbi_domain;
+struct sbi_trap_regs;
 
 /**
  * Enter a specific domain context synchronously
@@ -37,5 +38,11 @@ int sbi_domain_context_init(void);
 
 /* Deinitialize domain context support */
 void sbi_domain_context_deinit(void);
+
+int sbi_domain_context_set_mepc(struct sbi_domain *dom, unsigned long entry_point);
+int set_domain_regs(struct sbi_domain *domain, struct sbi_trap_regs *regs);
+int sbi_domain_hart_context_alloc(struct sbi_domain *dom);
+int sbi_domain_init_hart_context(struct sbi_domain *dom);
+void sbi_domain_restore_scratch();
 
 #endif // __SBI_DOMAIN_CONTEXT_H__

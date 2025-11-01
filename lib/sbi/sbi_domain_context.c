@@ -16,6 +16,7 @@
 #include <sbi/sbi_domain.h>
 #include <sbi/sbi_domain_context.h>
 #include <sbi/sbi_trap.h>
+#include <sbi_utils/fdt/fdt_helper.h>
 
 /** Context representation for a hart within a domain */
 struct hart_context {
@@ -85,6 +86,35 @@ static void hart_context_set(struct sbi_domain *dom, u32 hartindex,
 	hart_context_get(sbi_domain_thishart_ptr(),			\
 			 current_hartindex())
 
+
+static void debug_hart_context(const struct hart_context *ctx, bool target_flag)
+{
+#if 0
+	u32 hartindex = current_hartindex();
+	struct sbi_domain *dom = ctx->dom;
+	if (target_flag)
+		sbi_printf("%s: target domain: %s, hart:%x context:\n", __func__, dom->name, hartindex);
+	else
+		sbi_printf("%s: current domain: %s, hart:%x context:\n", __func__, dom->name, hartindex);
+	sbi_printf("S mode context: \n");
+
+	sbi_printf("sstatus: %lx\n", ctx->sstatus);
+	sbi_printf("sie: %lx\n", ctx->sie);
+	sbi_printf("stvec: %lx\n", ctx->stvec);
+	sbi_printf("sscratch: %lx\n", ctx->sscratch);
+	sbi_printf("sepc: %lx\n", ctx->sepc);
+	sbi_printf("scause: %lx\n", ctx->scause);
+	sbi_printf("stval: %lx\n", ctx->stval);
+	sbi_printf("sip: %lx\n", ctx->sip);
+	sbi_printf("statp: %lx\n", ctx->satp);
+
+	sbi_printf("trap context: \n");
+	sbi_printf("a0-a4: %lx,%lx,%lx,%lx\n", ctx->trap_ctx.regs.a0, ctx->trap_ctx.regs.a1, ctx->trap_ctx.regs.a2, ctx->trap_ctx.regs.a3);
+	sbi_printf("tp:%lx, gp:%lx, sp:%lx, ra:%lx\n", ctx->trap_ctx.regs.tp, ctx->trap_ctx.regs.gp, ctx->trap_ctx.regs.sp, ctx->trap_ctx.regs.ra);
+	sbi_printf("mepc: %lx\n", ctx->trap_ctx.regs.mepc);
+	sbi_printf("msstatus: %lx,\n", ctx->trap_ctx.regs.mstatus);
+#endif
+}
 /**
  * Switches the HART context from the current domain to the target domain.
  * This includes changing domain assignments and reconfiguring PMP, as well
@@ -140,6 +170,8 @@ static void switch_to_next_domain_context(struct hart_context *ctx,
 	sbi_memcpy(&ctx->trap_ctx, trap_ctx, sizeof(*trap_ctx));
 	sbi_memcpy(trap_ctx, &dom_ctx->trap_ctx, sizeof(*trap_ctx));
 
+	debug_hart_context(ctx, false);
+	debug_hart_context(dom_ctx, true);
 	/* Mark current context structure initialized because context saved */
 	ctx->initialized = true;
 
@@ -157,6 +189,19 @@ static void switch_to_next_domain_context(struct hart_context *ctx,
 	}
 }
 
+int sbi_domain_context_set_mepc(struct sbi_domain *dom, unsigned long entry_point)
+{
+	struct hart_context *dom_ctx = hart_context_get(dom, current_hartindex());
+
+	/* Validate the domain context existence */
+	if (!dom_ctx)
+		return SBI_EINVAL;
+
+	dom_ctx->trap_ctx.regs.mepc = entry_point;
+
+	return SBI_OK;
+}
+
 int sbi_domain_context_enter(struct sbi_domain *dom)
 {
 	struct hart_context *ctx = hart_context_thishart_get();
@@ -172,6 +217,25 @@ int sbi_domain_context_enter(struct sbi_domain *dom)
 	switch_to_next_domain_context(ctx, dom_ctx);
 
 	return 0;
+}
+
+int set_domain_regs(struct sbi_domain *domain, struct sbi_trap_regs *regs)
+{
+	struct hart_context *dom_ctx = hart_context_get(domain, current_hartindex());
+	/* Validate the domain context existence */
+	if (!dom_ctx)
+		return SBI_EINVAL;
+
+	dom_ctx->trap_ctx.regs.a0 = regs->a0;
+	dom_ctx->trap_ctx.regs.a1 = regs->a1;
+	dom_ctx->trap_ctx.regs.a2 = regs->a2;
+	dom_ctx->trap_ctx.regs.a3 = regs->a3;
+	dom_ctx->trap_ctx.regs.a4 = regs->a4;
+	dom_ctx->trap_ctx.regs.a5 = regs->a5;
+	dom_ctx->trap_ctx.regs.a6 = regs->a6;
+	dom_ctx->trap_ctx.regs.a7 = regs->a7;
+
+	return SBI_OK;
 }
 
 int sbi_domain_context_exit(void)
@@ -238,4 +302,92 @@ int sbi_domain_context_init(void)
 void sbi_domain_context_deinit(void)
 {
 	sbi_domain_unregister_data(&dcpriv);
+}
+
+int sbi_domain_hart_context_alloc(struct sbi_domain *dom)
+{
+	if(!dom)
+		return SBI_EINVAL;
+
+	u32 hartindex = current_hartindex();
+	struct hart_context *dom_ctx = hart_context_get(dom, hartindex);
+
+	if (!dom_ctx && sbi_hartmask_test_hartindex(hartindex, dom->possible_harts)) {
+		dom_ctx = sbi_zalloc(sizeof(struct hart_context));
+		if (!dom_ctx)
+			return SBI_ENOMEM;
+		dom_ctx->dom = dom;
+		hart_context_set(dom, hartindex, dom_ctx);
+	}
+
+	return SBI_OK;
+}
+
+int sbi_domain_init_hart_context(struct sbi_domain *dom)
+{
+	if(!dom)
+		return SBI_EINVAL;
+
+	u32 hartindex = current_hartindex();
+	struct hart_context *dom_ctx = hart_context_get(dom, hartindex);
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct hart_context *current_ctx = hart_context_thishart_get();
+	struct sbi_trap_context *trap_ctx;
+
+	//if dom is current domain(ree domain), read regs from current hart.
+	if (dom_ctx == current_ctx) {
+		dom_ctx->sstatus	= csr_read(CSR_SSTATUS);
+		dom_ctx->sie	= csr_read(CSR_SIE);
+		dom_ctx->stvec	= csr_read(CSR_STVEC);
+		dom_ctx->sscratch	= csr_read(CSR_SSCRATCH);
+		dom_ctx->sepc	= csr_read(CSR_SEPC);
+		dom_ctx->scause	= csr_read(CSR_SCAUSE);
+		dom_ctx->stval	= csr_read(CSR_STVAL);
+		dom_ctx->sip	= csr_read(CSR_SIP);
+		if (sbi_hart_priv_version(scratch) >= SBI_HART_PRIV_VER_1_10)
+			dom_ctx->scounteren = csr_swap(CSR_SCOUNTEREN, dom_ctx->scounteren);
+		if (sbi_hart_priv_version(scratch) >= SBI_HART_PRIV_VER_1_12)
+			dom_ctx->senvcfg	= csr_swap(CSR_SENVCFG, dom_ctx->senvcfg);
+
+		/* update to mepc and next_arg1 from scrash, this value is update by hsm start process*/
+		trap_ctx = sbi_trap_get_context(scratch);
+		dom_ctx->trap_ctx.regs.mepc = scratch->next_addr;
+		dom_ctx->trap_ctx.regs.a0 = hartindex;
+		dom_ctx->trap_ctx.regs.a1 = scratch->next_arg1;
+
+		/* Save current trap state */
+		dom_ctx->trap_ctx.prev_context = NULL;
+		sbi_trap_set_context(scratch, &dom_ctx->trap_ctx);
+		dom_ctx->initialized = true;
+	}
+	else {
+		dom_ctx->sstatus = 0;
+		sbi_memset(&dom_ctx->trap_ctx, 0, sizeof(*trap_ctx));
+
+		dom_ctx->sstatus = 0;
+		dom_ctx->sie = 0;
+		dom_ctx->stvec = 0;
+		dom_ctx->sscratch = 0;
+		dom_ctx->sepc = 0;
+		dom_ctx->scause = 0;
+		dom_ctx->stval = 0;
+		dom_ctx->sip = 0;
+		dom_ctx->satp = 0;
+
+		//set context initialized to true
+		dom_ctx->initialized = true;
+
+		dom_ctx->prev_ctx = current_ctx;
+		dom_ctx->trap_ctx.prev_context = &dom_ctx->trap_ctx;
+	}
+
+	return SBI_OK;
+}
+
+void sbi_domain_restore_scratch()
+{
+	struct hart_context *ctx = hart_context_thishart_get();
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	scratch->next_addr = ctx->trap_ctx.regs.mepc;
+	scratch->next_arg1 = ctx->trap_ctx.regs.a1;
 }

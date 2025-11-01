@@ -7,11 +7,16 @@
  *   Anup Patel <anup.patel@wdc.com>
  */
 
+#include <libfdt.h>
 #include <platform_override.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/fdt/fdt_fixup.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_pmu.h>
+#include <sbi/sbi_error.h>
+#include <sbi/sbi_string.h>
+#include <zhihe/teesmc_opteed.h>
+
 /* xuantie CSRS registers */
 #define CSR_SMPEN			0x7f3
 #define CSR_MTEE			0x7f4
@@ -33,6 +38,18 @@
 #define MARCHID_CXXX_BASE 0x8000000000000000
 #define MARCHID_C908 (MARCHID_CXXX_BASE + 0x9140d00)
 #define MARCHID_C920 (MARCHID_CXXX_BASE + 0x90c0d00)
+
+
+#define ABI_ENTRY_TYPE_FAST		1
+#define ABI_ENTRY_TYPE_YIELD		0
+#define FUNCID_TYPE_SHIFT		31
+#define FUNCID_TYPE_MASK		0x1
+#define GET_ABI_ENTRY_TYPE(id)		(((id) >> FUNCID_TYPE_SHIFT) & \
+					 FUNCID_TYPE_MASK)
+
+/* optee os vector table*/
+static struct optee_vectors *optee_vector_table = NULL;
+static struct sbi_domain *tee_domain = NULL, *ree_domain = NULL;
 
 static void init_csrs(void)
 {
@@ -77,6 +94,54 @@ static bool zhihe_p100_cold_boot_allowed(u32 hartid, const struct fdt_match *mat
 	return false;
 }
 
+static int zhihe_p100_cpu_on_process(void)
+{
+	/* if no optee return SBI OK*/
+	if (optee_vector_table == NULL)
+		return SBI_OK;
+	/* init ree domain hart context，data will be set in switch_to_next_domain_context */
+	if (sbi_domain_hart_context_alloc(ree_domain))
+		return SBI_ENOMEM;
+
+	sbi_domain_init_hart_context(ree_domain);
+
+	//init tee domain hart context and prepare context data
+	if (sbi_domain_hart_context_alloc(tee_domain))
+		return SBI_ENOMEM;
+
+	sbi_domain_init_hart_context(tee_domain);
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	scratch->next_addr = (ulong)&optee_vector_table->cpu_on_entry;
+	scratch->next_mode = tee_domain->next_mode;
+	scratch->next_arg1 = 0;
+
+	/* set current domain to tee domain */
+	sbi_update_hartindex_to_domain(current_hartindex(), tee_domain);
+	return SBI_OK;
+}
+
+static struct sbi_domain *__get_tdomain(void)
+{
+	struct sbi_domain *dom = NULL;
+	sbi_domain_for_each(dom) {
+		if (!sbi_strcmp(dom->name, "tee-domain"))
+			return dom;
+	}
+
+	return NULL;
+}
+
+static struct sbi_domain *__get_udomain(void)
+{
+	struct sbi_domain *dom = NULL;
+	sbi_domain_for_each(dom) {
+		if (!sbi_strcmp(dom->name, "ree-domain"))
+			return dom;
+	}
+
+	return NULL;
+}
+
 /*
  * if use S-mode register directly instead of stimecmp(CSR),
  * expect bit ENVCFG_STCE is 0
@@ -87,6 +152,16 @@ static int zhihe_p100_final_init(bool cold_boot, void *fdt,
 	uint64_t menvcfg_val = csr_read(CSR_MENVCFG);
 	menvcfg_val &= ~(ENVCFG_STCE);
 	csr_write(CSR_MENVCFG, menvcfg_val);
+
+	/* optee power on setup */
+	if (!cold_boot)
+		return zhihe_p100_cpu_on_process();
+	else {
+		if (!tee_domain)
+			tee_domain = __get_tdomain();
+		if (!ree_domain)
+			ree_domain = __get_udomain();
+	}
 
 	return 0;
 }
@@ -148,9 +223,162 @@ static int zhihe_p100_extensions_init(const struct fdt_match *match,
 	return 0;
 }
 
+static int sbi_ecall_tee_domain_enter(unsigned long entry_point)
+{
+	sbi_domain_context_set_mepc(tee_domain, entry_point);
+	sbi_domain_context_enter(tee_domain);
+	return 0;
+}
+
+static int sbi_ecall_tee_domain_exit(void)
+{
+	sbi_domain_context_exit();
+	return 0;
+}
+
+static void zhhie_p100_hsm_finish(void)
+{
+	u32 hartindex = current_hartindex();
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	sbi_domain_restore_scratch();
+	sbi_hart_switch_mode(hartindex, scratch->next_arg1, scratch->next_addr, scratch->next_mode, false);
+}
+
+static int zhi_p100_tee_smc_handler(long funcid, struct sbi_trap_regs *regs,
+				  struct sbi_ecall_return *out, const struct fdt_match *match)
+{
+	int ret = -1;
+	uint32_t funcid_type;
+	struct sbi_domain *dom = sbi_domain_thishart_ptr();
+
+	if (dom == ree_domain) {
+		funcid_type = GET_ABI_ENTRY_TYPE((regs->a0));
+		out->skip_regs_update = true;
+
+		set_domain_regs(tee_domain, regs);
+		sbi_ecall_tee_domain_enter((funcid_type == ABI_ENTRY_TYPE_FAST) ?
+					(ulong)&optee_vector_table->fast_smc_entry :
+					(ulong)&optee_vector_table->yield_smc_entry);
+
+		return SBI_SUCCESS;
+	}
+
+	switch (funcid) {
+		case TEESMC_OPTEED_RETURN_ENTRY_DONE:
+			optee_vector_table =  (optee_vectors_t *)(regs->a1);
+			sbi_domain_context_exit();
+			ret = SBI_SUCCESS;
+			break;
+		/*
+		* These function IDs is used only by OP-TEE to indicate it has
+		* finished:
+		* 1. turning itself on in response to an earlier psci
+		*	cpu_on request
+		* 2. resuming itself after an earlier psci cpu_suspend
+		*	request.
+		*/
+		case TEESMC_OPTEED_RETURN_ON_DONE:
+			out->skip_regs_update = true;
+			sbi_ecall_tee_domain_exit();
+			zhhie_p100_hsm_finish();
+			ret = SBI_SUCCESS;
+		case TEESMC_OPTEED_RETURN_RESUME_DONE:
+		/*
+		* These function IDs is used only by the SP to indicate it has
+		* finished:
+		* 1. suspending itself after an earlier psci cpu_suspend
+		*	request.
+		* 2. turning itself off in response to an earlier psci
+		*	cpu_off request.
+		*/
+		case TEESMC_OPTEED_RETURN_OFF_DONE:
+		case TEESMC_OPTEED_RETURN_SUSPEND_DONE:
+		case TEESMC_OPTEED_RETURN_SYSTEM_OFF_DONE:
+		case TEESMC_OPTEED_RETURN_SYSTEM_RESET_DONE:
+			//TODO BACK to tee os
+			break;
+		/*
+		* OPTEE is returning from a call or being preempted from a call, in
+		* either case execution should resume in the normal world.
+		*/
+		case TEESMC_OPTEED_RETURN_CALL_DONE:
+			//TODO goto to ree os
+			out->skip_regs_update = true;
+			set_domain_regs(ree_domain, regs);
+			sbi_ecall_tee_domain_exit();
+			regs->mepc += 4;
+			ret = SBI_SUCCESS;
+
+			break;
+		/*
+		* OPTEE has finished handling a S-EL1 FIQ interrupt. Execution
+		* should resume in the normal world.
+		*/
+		case TEESMC_OPTEED_RETURN_FIQ_DONE:
+			//TODO
+			break;
+		/*
+		* OPTEE has finished handling a secure world S-EL1 FIQ interrupt. Execution
+		* should resume in the secure world.
+		*/
+		case TEESMC_OPTEED_RETURN_FIQ2_DONE:
+			//TODO
+			break;
+		default:
+			break;
+	}
+	return ret;
+}
+
+static void fdt_restore_cpus_for_domain(void *fdt, struct sbi_domain *dom)
+{
+	int cpus_offset, cpu_off;
+	u32 hartid;
+	int rc;
+
+	if (!fdt || !dom)
+		return;
+
+	cpus_offset = fdt_path_offset(fdt, "/cpus");
+	if (cpus_offset < 0)
+		return;
+
+	/* ensure fdt has enough room if we will change properties */
+	rc = fdt_open_into(fdt, fdt, fdt_totalsize(fdt) + 32);
+	if (rc < 0)
+		return;
+
+	fdt_for_each_subnode(cpu_off, fdt, cpus_offset) {
+		rc = fdt_parse_hart_id(fdt, cpu_off, &hartid);
+		if (rc)
+			continue;
+
+		if (fdt_node_is_enabled(fdt, cpu_off))
+			continue;
+
+		/* if this hart belongs to the domain 'dom', ensure status is "okay" */
+		{
+			unsigned long hartindex = sbi_hartid_to_hartindex(hartid);
+			if (sbi_hartmask_test_hartindex(hartindex,dom->possible_harts)) {
+				/* set "status" = "okay" (create or replace) */
+				fdt_setprop_string(fdt, cpu_off, "status", "okay");
+			} else {
+				/* Optionally leave others as-is (they may be disabled) */
+			}
+		}
+	}
+}
+
+static int zhi_p100_fdt_fix_up(void *fdt, const struct fdt_match *match)
+{
+	/* restore cpu status*/
+	fdt_restore_cpus_for_domain(fdt, ree_domain);
+
+	return 0;
+}
+
 static const struct fdt_match zhihe_p100_match[] = {
 	{ .compatible = "zhihe,a210" },
-	{ .compatible = "zhihe,p100" },
 	{ },
 };
 
@@ -159,4 +387,6 @@ const struct platform_override zhihe_p100 = {
 	.cold_boot_allowed = zhihe_p100_cold_boot_allowed,
 	.final_init = zhihe_p100_final_init,
 	.extensions_init	= zhihe_p100_extensions_init,
+	.vendor_ext_provider = zhi_p100_tee_smc_handler,
+	.fdt_fixup = zhi_p100_fdt_fix_up,
 };

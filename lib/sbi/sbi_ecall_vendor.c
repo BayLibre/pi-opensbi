@@ -40,7 +40,7 @@ static int sbi_ecall_vendor_register_extensions(void)
 		return 0;
 
 	ecall_vendor.extid_start = extid;
-	ecall_vendor.extid_end = extid;
+	ecall_vendor.extid_end = SBI_EXT_VENDOR_END;
 
 	return sbi_ecall_register_extension(&ecall_vendor);
 }
