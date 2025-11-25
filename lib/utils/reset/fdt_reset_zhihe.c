@@ -11,8 +11,6 @@
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/reset/fdt_reset.h>
 
-static int nr_dies = 1;
-
 __attribute__((naked, noreturn)) static void core_start_warm(void)
 {
 	__asm__ __volatile__ (				   \
@@ -43,109 +41,67 @@ static struct sbi_system_reset_device imp_reset = {
 	.system_reset = imp_system_reset
 };
 
-#define NCORE_BASE			0x6f800000
+#define DIE0_OFFSET			0x0
 #define DIE1_OFFSET			0x2000000000ul
-
+#define NCORE_BASE			0x6f800000
 #define ACE1_OFFSET			0x1000
 #define ACE3_OFFSET			0x3000
 #define XAIUTCR				0x40
 #define XAIUTAR				0x44
 
-#define NCORE_OFFSET_ACE1		NCORE_BASE + ACE1_OFFSET
-#define NCORE_OFFSET_ACE1_XAIUTCR	NCORE_OFFSET_ACE1 + XAIUTCR
-#define NCORE_OFFSET_ACE1_XAIUTAR	NCORE_OFFSET_ACE1 + XAIUTAR
-#define NCORE_OFFSET_ACE3		NCORE_BASE + ACE3_OFFSET
-#define NCORE_OFFSET_ACE3_XAIUTCR	NCORE_OFFSET_ACE3 + XAIUTCR
-#define NCORE_OFFSET_ACE3_XAIUTAR	NCORE_OFFSET_ACE3 + XAIUTAR
-
-#define DIE1_NCORE_OFFSET_ACE1_XAIUTCR	DIE1_OFFSET + NCORE_OFFSET_ACE1 + XAIUTCR
-#define DIE1_NCORE_OFFSET_ACE1_XAIUTAR	DIE1_OFFSET + NCORE_OFFSET_ACE1 + XAIUTAR
-#define DIE1_NCORE_OFFSET_ACE3_XAIUTCR	DIE1_OFFSET + NCORE_OFFSET_ACE3 + XAIUTCR
-#define DIE1_NCORE_OFFSET_ACE3_XAIUTAR	DIE1_OFFSET + NCORE_OFFSET_ACE3 + XAIUTAR
-
 #define MEM32(addr) *((volatile unsigned int *)(addr))
 static void wr(u64 addr, u32 data)
 {
-    MEM32(addr) = data;
+	MEM32(addr) = data;
 }
 
 static u32 rd(u64 addr)
 {
 	u32 data;
-    data = MEM32(addr);
-    return data;
-}
-static void wait_cluster1_co_attach(void)
-{
-    wr(NCORE_OFFSET_ACE1_XAIUTCR,0x1<<9);
-    while(!(rd(NCORE_OFFSET_ACE1_XAIUTAR)&(0x1<<5))){;}
-
-    if (nr_dies >= 2) {
-	    wr(DIE1_NCORE_OFFSET_ACE3_XAIUTCR,0x1<<9);
-	    while(!(rd(DIE1_NCORE_OFFSET_ACE3_XAIUTAR)&(0x1<<5))){;}
-    }
+	data = MEM32(addr);
+	return data;
 }
 
-static void wait_cluster3_co_attach(void)
-{
-    wr(DIE1_NCORE_OFFSET_ACE1_XAIUTCR,0x1<<9);
-    while(!(rd(DIE1_NCORE_OFFSET_ACE1_XAIUTAR)&(0x1<<5))){;}
+#define CLUSTER_ATTACH(ace, die) do { \
+	wr(NCORE_BASE + XAIUTCR + ace + die, 0x1<<9); \
+	while(!(rd(NCORE_BASE + XAIUTAR + ace + die) & (0x1 << 5))){;} \
+} while(0)
 
-    wr(NCORE_OFFSET_ACE3_XAIUTCR,0x1<<9);
-    while(!(rd(NCORE_OFFSET_ACE3_XAIUTAR)&(0x1<<5))){;}
-}
-
-/* only reset DIE1 first c908 */
-static void reset_die1_boot_hart(void *control_reg_addr)
-{
-	unsigned int val;
-
-	val = readl(control_reg_addr);
-	/* assert */
-	val &= ~(1 << 1);
-	val |= 0x1;
-	writel(val, control_reg_addr);
-
-	/* de-assert */
-	val |= (1 << 1);
-	writel(val, control_reg_addr);
-
-	return;
-}
-
-static void parse_nr_dies(const void *fdt, int nodeoff)
+static int get_die_count(const void *fdt, int nodeoff)
 {
 	int d2d_offset, len;
 	const fdt32_t *val;
 	u32 phandle;
+	int nr_dies = 1;
 
 	val = fdt_getprop(fdt, nodeoff, "d2d-info", &len);
-	if (!val || len < sizeof(fdt32_t)) {
-		return;
-	}
+	if (!val || len < sizeof(fdt32_t))
+		return nr_dies;
 
 	phandle = fdt32_to_cpu(*val);
 	d2d_offset = fdt_node_offset_by_phandle(fdt, phandle);
-	if (d2d_offset < 0) {
-		return;
-	}
+	if (d2d_offset < 0)
+		return nr_dies;
 
 	val = fdt_getprop(fdt, d2d_offset, "nr_dies", &len);
 	if (len > 0 && val)
 		nr_dies = fdt32_to_cpu(*val);
+
+	return nr_dies;
 }
 
 static int imp_reset_init(const void *fdt, int nodeoff,
 			  const struct fdt_match *match)
 {
 	void *p;
-	const fdt64_t *val, *val_entry_reg, *val_ctrl_reg;
+	const fdt64_t *val, *entry_reg, *ctrl_reg;
 	const fdt32_t *val_w_entry_cnt, *val_w_ctrl_val;
 	int len, len2, i, cnt = 0;
-	u32 t, tmp = 0;
+	u32 t, entry_cnt, ctrl_val;
 	int cluster_cnt = 0;
+	int nr_dies;
 
-	parse_nr_dies(fdt, nodeoff);
+	nr_dies = get_die_count(fdt, nodeoff);
 
 	/* Delegate plic enable regs for S-mode */
 	val = fdt_getprop(fdt, nodeoff, "plic-delegate", &len);
@@ -165,10 +121,10 @@ static int imp_reset_init(const void *fdt, int nodeoff,
 	 * entry-reg = <0x00 0x10148040 0x00 0x10148060>;
 	 * control-reg = <0x00 0x10144004 0x00 0x10144008>;
 	 */
-	val_entry_reg = fdt_getprop(fdt, nodeoff, "entry-reg", &len);
-	val_ctrl_reg = fdt_getprop(fdt, nodeoff, "control-reg", &len2);
+	entry_reg = fdt_getprop(fdt, nodeoff, "entry-reg", &len);
+	ctrl_reg = fdt_getprop(fdt, nodeoff, "control-reg", &len2);
 
-	if (len <= 0 || len2 <= 0 || len != len2 || val_entry_reg == NULL || val_ctrl_reg == NULL ) {
+	if (len <= 0 || len2 <= 0 || len != len2 || entry_reg == NULL || ctrl_reg == NULL ) {
 		goto check_err;
 	}
 	cluster_cnt = len / sizeof(fdt64_t);
@@ -189,9 +145,9 @@ static int imp_reset_init(const void *fdt, int nodeoff,
 
 	/* Set the reset address of each CPU in each cluster */
 	for (cnt = 0; cnt < cluster_cnt; cnt++) {
-		p = (void *)(ulong)fdt64_to_cpu(val_entry_reg[cnt]);
-		tmp = fdt32_to_cpu(val_w_entry_cnt[cnt]);
-		for (i = 0; i < tmp; i++) {
+		p = (void *)(ulong)fdt64_to_cpu(entry_reg[cnt]);
+		entry_cnt = fdt32_to_cpu(val_w_entry_cnt[cnt]);
+		for (i = 0; i < entry_cnt; i++) {
 			t = (u32) (core_entry & 0xFFFFFFFF);
 			writel(t, p + (8 * i));
 			t = (u32)(core_entry >> 32);
@@ -200,24 +156,25 @@ static int imp_reset_init(const void *fdt, int nodeoff,
 	}
 
 	/* Reset each CPU in each cluster */
-	for (cnt = 0; cnt < cluster_cnt; cnt++) {
-		/* if tmp == 0, disabled all core */
-		tmp = fdt32_to_cpu(val_w_ctrl_val[cnt]);
-		if (cnt == 1 && tmp > 1) {
-			wait_cluster1_co_attach();
+	for (cnt = cluster_cnt - 1; cnt >= 0; cnt--) {
+		ctrl_val = fdt32_to_cpu(val_w_ctrl_val[cnt]);
+		p = (void *)(ulong)fdt64_to_cpu(ctrl_reg[cnt]);
+
+		if (cnt > 0 && ctrl_val > 1) {
+			/* deassert cluster firstly */
+			writel(0x1, p);
+			if (cnt == 1) {
+				CLUSTER_ATTACH(ACE1_OFFSET, DIE0_OFFSET);
+				if (nr_dies > 1)
+					CLUSTER_ATTACH(ACE3_OFFSET, DIE1_OFFSET);
+			} else if (cnt == 3) {
+				CLUSTER_ATTACH(ACE1_OFFSET, DIE1_OFFSET);
+				CLUSTER_ATTACH(ACE3_OFFSET, DIE0_OFFSET);
+			}
 		}
 
-		if (cnt == 3 && tmp > 1) {
-			wait_cluster3_co_attach();
-		}
-
-		p = (void *)(ulong)fdt64_to_cpu(val_ctrl_reg[cnt]);
-		writel(tmp, p);
+		writel(ctrl_val, p);
 	}
-
-	/*  Reset die1 HART0 */
-	if (cluster_cnt > 2)
-		reset_die1_boot_hart((void*)(ulong)(fdt64_to_cpu(val_ctrl_reg[2])));
 
 check_err:
 	sbi_system_reset_add_device(&imp_reset);
