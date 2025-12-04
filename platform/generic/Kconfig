@@ -68,8 +68,8 @@ config PLATFORM_THEAD
 	select THEAD_C9XX_PMU
 	default n
 
-config PLATFORM_ZHIHE_P100
-	bool "ZHIHE p100 support"
+config PLATFORM_ZHIHE_A210
+	bool "ZHIHE A210 support"
 	default n
 
 source "$(OPENSBI_SRC_DIR)/platform/generic/andes/Kconfig"

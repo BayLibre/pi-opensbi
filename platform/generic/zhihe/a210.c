@@ -24,21 +24,20 @@
 #define CSR_MHCR			0x7c1
 #define CSR_MCCR2			0x7c3
 #define CSR_MHINT			0x7c5
-#define CSR_MCOUNTERWEN 	0x7c9
-#define CSR_MCOUNTEROF		0x7cb
+#define CSR_MCOUNTERWEN			0x7c9
+#define CSR_MCOUNTEROF			0x7cb
 #define CSR_MHINT2			0x7cc
 #define CSR_MHINT3			0x7cd
 #define CSR_MHINT4			0x7ce
-#define CSR_MXSTATUS		0x7c0
-#define THEAD_C9XX_CSR_MHPMEVENT0   0x7e0
-#define THEAD_C9XX_CSR_MHPMEVENT2   0x7e1
+#define CSR_MXSTATUS			0x7c0
+#define THEAD_C9XX_CSR_MHPMEVENT0	0x7e0
+#define THEAD_C9XX_CSR_MHPMEVENT2	0x7e1
 #define CSR_MSMPR			0x7f3
-#define CSR_MHPMEVENT0		0x7e0
+#define CSR_MHPMEVENT0			0x7e0
 
 #define MARCHID_CXXX_BASE 0x8000000000000000
 #define MARCHID_C908 (MARCHID_CXXX_BASE + 0x9140d00)
 #define MARCHID_C920 (MARCHID_CXXX_BASE + 0x90c0d00)
-
 
 #define ABI_ENTRY_TYPE_FAST		1
 #define ABI_ENTRY_TYPE_YIELD		0
@@ -84,7 +83,7 @@ static void init_csrs(void)
 	}
 }
 
-static bool zhihe_p100_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
+static bool zhihe_a210_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
 {
 	if (hartid == 0)
 		return true;
@@ -94,7 +93,7 @@ static bool zhihe_p100_cold_boot_allowed(u32 hartid, const struct fdt_match *mat
 	return false;
 }
 
-static int zhihe_p100_cpu_on_process(void)
+static int zhihe_a210_cpu_on_process(void)
 {
 	/* if no optee return SBI OK*/
 	if (optee_vector_table == NULL)
@@ -146,7 +145,7 @@ static struct sbi_domain *__get_udomain(void)
  * if use S-mode register directly instead of stimecmp(CSR),
  * expect bit ENVCFG_STCE is 0
  */
-static int zhihe_p100_final_init(bool cold_boot, void *fdt,
+static int zhihe_a210_final_init(bool cold_boot, void *fdt,
 				   const struct fdt_match *match)
 {
 	uint64_t menvcfg_val = csr_read(CSR_MENVCFG);
@@ -155,7 +154,7 @@ static int zhihe_p100_final_init(bool cold_boot, void *fdt,
 
 	/* optee power on setup */
 	if (!cold_boot)
-		return zhihe_p100_cpu_on_process();
+		return zhihe_a210_cpu_on_process();
 	else {
 		if (!tee_domain)
 			tee_domain = __get_tdomain();
@@ -167,7 +166,7 @@ static int zhihe_p100_final_init(bool cold_boot, void *fdt,
 }
 
 /*********************** pmu extention ***********************/
-static void zhihe_p100_pmu_ctr_enable_irq(uint32_t idx)
+static void zhihe_a210_pmu_ctr_enable_irq(uint32_t idx)
 {
 	#define CASE_C_OVF(idx) case idx:                 \
 							csr_clear(mhpmevent##idx, 0x8000000000000000);  \
@@ -200,13 +199,13 @@ static void zhihe_p100_pmu_ctr_enable_irq(uint32_t idx)
 	}
 }
 
-static const struct sbi_pmu_device zhihe_p100_pmu_device = {
+static const struct sbi_pmu_device zhihe_a210_pmu_device = {
 	.name = "thead,c908.c920v2-pmu",
-	.hw_counter_enable_irq = zhihe_p100_pmu_ctr_enable_irq,
+	.hw_counter_enable_irq = zhihe_a210_pmu_ctr_enable_irq,
 };
 
 
-static int zhihe_p100_extensions_init(const struct fdt_match *match,
+static int zhihe_a210_extensions_init(const struct fdt_match *match,
 					 struct sbi_hart_features *hfeatures)
 {
 	// all cpu should initial PMU
@@ -219,7 +218,7 @@ static int zhihe_p100_extensions_init(const struct fdt_match *match,
 	// set CSR_MCOUNTEREN to enable scountovf
 	csr_write(CSR_MCOUNTERWEN, 0xffffffff);
 
-	sbi_pmu_set_device(&zhihe_p100_pmu_device);
+	sbi_pmu_set_device(&zhihe_a210_pmu_device);
 	return 0;
 }
 
@@ -236,7 +235,7 @@ static int sbi_ecall_tee_domain_exit(void)
 	return 0;
 }
 
-static void zhhie_p100_hsm_finish(void)
+static void zhhie_a210_hsm_finish(void)
 {
 	u32 hartindex = current_hartindex();
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
@@ -244,7 +243,7 @@ static void zhhie_p100_hsm_finish(void)
 	sbi_hart_switch_mode(hartindex, scratch->next_arg1, scratch->next_addr, scratch->next_mode, false);
 }
 
-static int zhi_p100_tee_smc_handler(long funcid, struct sbi_trap_regs *regs,
+static int zhi_a210_tee_smc_handler(long funcid, struct sbi_trap_regs *regs,
 				  struct sbi_ecall_return *out, const struct fdt_match *match)
 {
 	int ret = -1;
@@ -280,7 +279,7 @@ static int zhi_p100_tee_smc_handler(long funcid, struct sbi_trap_regs *regs,
 		case TEESMC_OPTEED_RETURN_ON_DONE:
 			out->skip_regs_update = true;
 			sbi_ecall_tee_domain_exit();
-			zhhie_p100_hsm_finish();
+			zhhie_a210_hsm_finish();
 			ret = SBI_SUCCESS;
 		case TEESMC_OPTEED_RETURN_RESUME_DONE:
 		/*
@@ -369,7 +368,7 @@ static void fdt_restore_cpus_for_domain(void *fdt, struct sbi_domain *dom)
 	}
 }
 
-static int zhi_p100_fdt_fix_up(void *fdt, const struct fdt_match *match)
+static int zhi_a210_fdt_fix_up(void *fdt, const struct fdt_match *match)
 {
 	/* restore cpu status*/
 	fdt_restore_cpus_for_domain(fdt, ree_domain);
@@ -377,16 +376,16 @@ static int zhi_p100_fdt_fix_up(void *fdt, const struct fdt_match *match)
 	return 0;
 }
 
-static const struct fdt_match zhihe_p100_match[] = {
+static const struct fdt_match zhihe_a210_match[] = {
 	{ .compatible = "zhihe,a210" },
 	{ },
 };
 
-const struct platform_override zhihe_p100 = {
-	.match_table = zhihe_p100_match,
-	.cold_boot_allowed = zhihe_p100_cold_boot_allowed,
-	.final_init = zhihe_p100_final_init,
-	.extensions_init	= zhihe_p100_extensions_init,
-	.vendor_ext_provider = zhi_p100_tee_smc_handler,
-	.fdt_fixup = zhi_p100_fdt_fix_up,
+const struct platform_override zhihe_a210 = {
+	.match_table		= zhihe_a210_match,
+	.cold_boot_allowed 	= zhihe_a210_cold_boot_allowed,
+	.final_init		= zhihe_a210_final_init,
+	.extensions_init	= zhihe_a210_extensions_init,
+	.vendor_ext_provider	= zhi_a210_tee_smc_handler,
+	.fdt_fixup		= zhi_a210_fdt_fix_up,
 };
