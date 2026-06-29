@@ -105,6 +105,10 @@ config PLATFORM_SPACEMIT_K1
 	select FDT_HSM_SPACEMIT
 	default n
 
+config PLATFORM_SPACEMIT_K3
+	bool "Spacemit K3 support"
+	default n
+
 config CPU_MIPS_P8700
 	bool
 	default n
