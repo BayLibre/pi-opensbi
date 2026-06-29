@@ -121,9 +121,8 @@ void uart8250_device_init(struct uart8250_device *dev, unsigned long base,
 		       (16 * dev->baudrate);
 	}
 
-	/* Disable all interrupts */
-	set_reg(dev, UART_IER_OFFSET, (caps & UART_CAP_UUE) ?
-				 UART_IER_UUE : 0x00);
+	/* Keep UUE set so the SpacemiT/PXA-derived K3 UART unit stays enabled */
+	set_reg(dev, UART_IER_OFFSET, UART_IER_UUE);
 	/* Enable DLAB */
 	set_reg(dev, UART_LCR_OFFSET, 0x80);
 
