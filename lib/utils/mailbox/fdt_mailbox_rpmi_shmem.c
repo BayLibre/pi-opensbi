@@ -23,6 +23,45 @@
 #include <sbi_utils/mailbox/fdt_mailbox.h>
 #include <sbi_utils/mailbox/rpmi_mailbox.h>
 
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+/* K3 mailbox doorbell register offsets, relative to the db-reg block base */
+#define MAILBOX_DOORBALL_TRIGGER_OFFSET	0x40
+#define MAILBOX_INT_EN_REG_OFFSET	0x118
+/* Naturally aligned block registered with PMP (>= hart PMP granularity) */
+#define MAILBOX_PMP_REGION_SIZE		0x1000
+
+/*
+ * The RPMI agent runs on the RCPUs, which are not coherent with the AP
+ * caches for the shared-memory queue window: every queue access needs
+ * explicit cache maintenance or the agent never sees our requests (and we
+ * read stale responses). Mirrors the vendor transport. Zicbom ops are
+ * emitted by encoding (.insn) so the build does not depend on -march;
+ * cbo.* is always legal in M-mode.
+ */
+#define SMQ_CACHE_LINE_SIZE	64UL
+
+#define smq_cache_op_range(addr, size, op_imm)				\
+do {									\
+	uintptr_t __a = (uintptr_t)(addr) & ~(SMQ_CACHE_LINE_SIZE - 1);	\
+	uintptr_t __e = (uintptr_t)(addr) + (size);			\
+									\
+	asm volatile("fence rw, rw" ::: "memory");			\
+	for (; __a < __e; __a += SMQ_CACHE_LINE_SIZE)			\
+		asm volatile(".insn i 0x0f, 0x2, x0, %0, " op_imm	\
+			     : : "r"(__a) : "memory");			\
+	asm volatile("fence rw, rw" ::: "memory");			\
+} while (0)
+
+/* cbo.inval = imm 0, cbo.clean = imm 1, cbo.flush = imm 2 */
+#define smq_cache_inval(addr, size)	smq_cache_op_range(addr, size, "0")
+#define smq_cache_clean(addr, size)	smq_cache_op_range(addr, size, "1")
+#define smq_cache_flush(addr, size)	smq_cache_op_range(addr, size, "2")
+#else
+#define smq_cache_inval(addr, size)	do { } while (0)
+#define smq_cache_clean(addr, size)	do { } while (0)
+#define smq_cache_flush(addr, size)	do { } while (0)
+#endif
+
 /** Minimum Base group version required */
 #define RPMI_BASE_VERSION_MIN		RPMI_VERSION(1, 0)
 
@@ -182,6 +221,10 @@ static int __smq_rx(struct smq_queue_ctx *qctx, u32 slot_size,
 	if ((sizeof(u32) * args->rx_endian_words) > xfer->rx_len)
 		return SBI_EINVAL;
 
+	/* Pull the agent-side head/tail updates out of memory */
+	smq_cache_inval(qctx->headptr, sizeof(*qctx->headptr));
+	smq_cache_inval(qctx->tailptr, sizeof(*qctx->tailptr));
+
 	/* There should be some message in the queue */
 	if (__smq_queue_empty(qctx))
 		return SBI_ENOENT;
@@ -200,6 +243,7 @@ static int __smq_rx(struct smq_queue_ctx *qctx, u32 slot_size,
 	pos = headidx;
 	while (pos != tailidx) {
 		src = (void *)qctx->buffer + (pos * slot_size);
+		smq_cache_inval(src, slot_size);
 		if ((no_rx_token && GET_MESSAGE_ID(src) == msgidn) ||
 		    (GET_TOKEN(src) == (xfer->seq & RPMI_MSG_TOKEN_MASK)))
 			break;
@@ -217,6 +261,8 @@ static int __smq_rx(struct smq_queue_ctx *qctx, u32 slot_size,
 			((u32 *)dst)[i] = ((u32 *)src)[i];
 			((u32 *)src)[i] = tmp;
 		}
+		smq_cache_clean(src, slot_size);
+		smq_cache_clean(dst, slot_size);
 	}
 
 	/* Update rx_token if not available */
@@ -241,6 +287,7 @@ static int __smq_rx(struct smq_queue_ctx *qctx, u32 slot_size,
 
 	/* Update the head/read index */
 	*qctx->headptr = cpu_to_le32(headidx + 1) % qctx->num_slots;
+	smq_cache_flush(qctx->headptr, sizeof(*qctx->headptr));
 
 	/* Make sure updates to head are immediately visible to PuC */
 	smp_wmb();
@@ -263,6 +310,10 @@ static int __smq_tx(struct smq_queue_ctx *qctx, struct rpmi_mb_regs *mb_regs,
 		return SBI_EINVAL;
 	if ((sizeof(u32) * args->tx_endian_words) > xfer->tx_len)
 		return SBI_EINVAL;
+
+	/* Pull the agent-side head/tail updates out of memory */
+	smq_cache_inval(qctx->headptr, sizeof(*qctx->headptr));
+	smq_cache_inval(qctx->tailptr, sizeof(*qctx->tailptr));
 
 	/* There should be some room in the queue */
 	if (__smq_queue_full(qctx))
@@ -294,11 +345,16 @@ static int __smq_tx(struct smq_queue_ctx *qctx, struct rpmi_mb_regs *mb_regs,
 			xfer->tx_len - (sizeof(u32) * args->tx_endian_words));
 	}
 
+	/* Push the written slot out to memory for the agent */
+	smq_cache_flush((char *)qctx->buffer + (tailidx * slot_size),
+			slot_size);
+
 	/* Make sure queue chanages are visible to PuC before updating tail */
 	smp_wmb();
 
 	/* Update the tail/write index */
 	*qctx->tailptr = cpu_to_le32(tailidx + 1) % qctx->num_slots;
+	smq_cache_flush(qctx->tailptr, sizeof(*qctx->tailptr));
 
 	/* Ring the RPMI doorbell if present */
 	if (mb_regs)
@@ -680,7 +736,29 @@ static int rpmi_shmem_transport_init(struct rpmi_shmem_mbox_controller *mctl,
 	ret = fdt_get_node_addr_size(fdt, nodeoff, qid, &reg_addr,
 				       &reg_size);
 	if (!ret && !(strncmp(name, "a2p-doorbell", strlen("a2p-doorbell")))) {
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+		/*
+		 * On K3 the doorbell is rung through a dedicated trigger
+		 * register (base + 0x40); the per-user mailbox IRQ must also
+		 * be enabled once (base + 0x118) so the RCPU is interrupted on
+		 * a doorbell write.
+		 */
+		mctl->mb_regs = (void *)((unsigned long)reg_addr +
+					 MAILBOX_DOORBALL_TRIGGER_OFFSET);
+		writel(1, (void *)((unsigned long)reg_addr +
+				   MAILBOX_INT_EN_REG_OFFSET));
+		/*
+		 * The doorbell reg window (0x200) is smaller than the hart PMP
+		 * granularity, so it cannot get its own PMP entry ("not in
+		 * range" warning). Register the naturally aligned mailbox
+		 * block containing both the trigger (+0x40) and the IRQ-enable
+		 * (+0x118) registers instead.
+		 */
+		reg_addr &= ~((uint64_t)MAILBOX_PMP_REGION_SIZE - 1);
+		reg_size = MAILBOX_PMP_REGION_SIZE;
+#else
 		mctl->mb_regs = (void *)(unsigned long)reg_addr;
+#endif
 		ret = sbi_domain_root_add_memrange(reg_addr, reg_size, reg_size,
 						   (SBI_DOMAIN_MEMREGION_MMIO |
 						    SBI_DOMAIN_MEMREGION_M_READABLE |
@@ -734,9 +812,25 @@ static int rpmi_shmem_mbox_init(const void *fdt, int nodeoff,
 
 	/* Update base service group version */
 	base_srvgrp = to_srvgrp_chan(mctl->base_chan);
-	args[0] = RPMI_SRVGRP_BASE;
-	ret = smq_base_get_two_u32(mctl, RPMI_BASE_SRV_PROBE_SERVICE_GROUP,
-				   &args[0], tval);
+	/*
+	 * The RPMI agent (on K3, the ESOS firmware the SPL started on the
+	 * RCPUs just before jumping here) may still be bringing up its
+	 * shared-memory queues when we probe. Retry the first exchange over
+	 * ~1.4s instead of giving up on the first bounded timeout.
+	 */
+	{
+		int retry = 20;
+
+		do {
+			args[0] = RPMI_SRVGRP_BASE;
+			ret = smq_base_get_two_u32(mctl,
+					RPMI_BASE_SRV_PROBE_SERVICE_GROUP,
+					&args[0], tval);
+			if (ret != SBI_ETIMEDOUT)
+				break;
+			sbi_timer_mdelay(50);
+		} while (--retry);
+	}
 	if (ret)
 		goto fail_free_chan;
 	base_srvgrp->servicegroup_version = tval[1];
@@ -786,6 +880,16 @@ static int rpmi_shmem_mbox_init(const void *fdt, int nodeoff,
 	/* 1: Supported, 0: Not Supported */
 	mctl->base_flags.f0_ev_notif_en =
 			resp.f0 & RPMI_BASE_FLAGS_F0_EV_NOTIFY ? 1 : 0;
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+	/*
+	 * The K3 ESOS agent implements the pre-ratification RPMI draft where
+	 * F0 carried an MSI_EN flag at bit 0 and the privilege flag at bit 2
+	 * (the ratified spec dropped MSI_EN and shifted the flags down one
+	 * bit). Honour the agent's layout for the M-mode privilege check.
+	 */
+	if (resp.f0 & (1U << 2))
+		mctl->base_flags.f0_priv_level = 1;
+#endif
 
 	/* We only use M-mode RPMI context in OpenSBI */
 	if (!mctl->base_flags.f0_priv_level) {
