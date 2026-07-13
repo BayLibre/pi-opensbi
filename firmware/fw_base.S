@@ -14,6 +14,18 @@
 #include <sbi/sbi_scratch.h>
 #include <sbi/sbi_trap.h>
 
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+/*
+ * SpacemiT K3 custom M-mode CSRs, from the vendor OpenSBI
+ * platform/generic/include/spacemit/k3/core_common.h. Defined locally here
+ * because that header (our <spacemit/k3.h>) also declares C structs and
+ * inline helpers and is not assembly-safe.
+ */
+#define CSR_MSETUP			0x7c0
+#define CSR_ML2SETUP			0x7f0
+#define CSR_PMACFG0			0x7de
+#endif
+
 #define BOOT_LOTTERY_ACQUIRED		1
 #define BOOT_STATUS_BOOT_HART_DONE	1
 
@@ -322,6 +334,73 @@ _start_warm:
 	/* Disable all interrupts */
 	csrw	CSR_MIE, zero
 
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+	/*
+	 * SpacemiT K3 M-mode cache/coherency bring-up (ported verbatim from
+	 * the vendor OpenSBI firmware/fw_base.S _start_warm). Without this the
+	 * M-mode trap handler and stack run with the dcache off and this hart
+	 * outside the CCI-550 snoop domain, so once S-mode enables its
+	 * MMU/caches the M-mode stack accesses become incoherent.
+	 */
+
+	/* set audio buffer to cacheable */
+	li      t0, 0xff
+	slli    t0, t0, 48
+	csrc    CSR_PMACFG0, t0
+	li      t0, 0x20
+	slli    t0, t0, 48
+	csrs    CSR_PMACFG0, t0
+	sfence.vma
+
+	/* set XIP address to IO attribute */
+	lui     t0, 0xff0
+	csrc    CSR_PMACFG0, t0
+	lui     t0, 0x220
+	csrs    CSR_PMACFG0, t0
+	sfence.vma
+
+	/*
+	 * enable core snoop
+	 */
+	csrw	CSR_ML2SETUP, zero
+	csrr	t0, CSR_MHARTID
+	andi	t1, t0, 3
+	li      a5, 1
+	sllw    a5, a5, t1
+	csrs    CSR_ML2SETUP, a5
+
+	/*
+	 *  enable dcache
+	 *  the reason why dcache is enabled here is because
+	 *  1. some instructions like amo depends on dcache
+	 *  2. if dcache is turned on in C code, the data read
+	 *	from the stack may be incorrect
+	 */
+	lui	a5, 0x10
+	addi	a5, a5, 115 # 10073
+	csrs	CSR_MSETUP, a5
+	fence	iorw, iorw
+
+	/*
+	 * Enable hypervisor extension for X100.
+	 * Skip this for A100 since A100 doesn't support it.
+	 *
+	 * Hart IDs:
+	 *	X100: 0-7
+	 *	A100: 8-15
+	 */
+	csrr	t0, CSR_MHARTID
+	li	t1, 8
+	bgeu	t0, t1, _skip_enable_h_extension
+	csrr	t2, CSR_MISA
+	li	t3, 0x1
+	slli	t3, t3, ('H' - 'A')
+	or	t2, t2, t3
+	csrw	CSR_MISA, t2
+
+_skip_enable_h_extension:
+#endif
+
 	/* Find HART count and HART stack size */
 	lla	a4, platform
 #if __riscv_xlen > 32
@@ -427,6 +506,37 @@ _hartid_to_scratch:
 _start_hang:
 	wfi
 	j	_start_hang
+
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+	/*
+	 * SpacemiT K3 cluster-2 dummy-core park. core8 is woken in
+	 * spacemit_k3_pre_init only to fold cluster 2 into the CCI-550
+	 * coherency domain for the IO-coherent masters, and must stay POWERED:
+	 * power-gating it (the vendor boot_entry_dummy vote_powrdown_core(8))
+	 * collapses cluster 2 out of the snoop domain and re-breaks the UFS
+	 * coherent-write (OCS=f) on our U-Boot path -- verified on HW. So we only
+	 * quiesce: flush + disable this core's dcache and clear its snoop lane,
+	 * then park powered in WFI. Self-contained (no stack / hart-index
+	 * machinery) since hartid 8 is not in our 8-hart enumeration.
+	 */
+	.align 3
+	.globl _start_warm_dummy
+_start_warm_dummy:
+	li	t0, 0x3
+	csrs	0x7c2, t0		/* csi_flush_dcache_all */
+	fence	iorw, iorw
+	li	t0, 0x3
+	csrc	CSR_MSETUP, t0		/* csi_disable_cache (I/D cache off) */
+	fence	iorw, iorw
+	csrr	t0, CSR_MHARTID		/* clear this core's snoop lane */
+	andi	t0, t0, 3
+	li	t1, 1
+	sll	t1, t1, t0
+	csrc	CSR_ML2SETUP, t1
+	fence	iorw, iorw
+1:	wfi
+	j	1b
+#endif
 
 	.section .entry, "ax", %progbits
 	.align 3
