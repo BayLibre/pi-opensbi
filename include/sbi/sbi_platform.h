@@ -163,8 +163,18 @@ struct sbi_platform_operations {
 	int (*rnmi_handler)(struct sbi_trap_context *tcntx);
 };
 
-/** Platform default per-HART stack size for exception/interrupt handling */
-#define SBI_PLATFORM_DEFAULT_HART_STACK_SIZE	8192
+/*
+ * Platform default per-HART stack size for exception/interrupt handling.
+ *
+ * Must exceed SBI_SCRATCH_SIZE (0x2000): the scratch area sits at the top of
+ * each HART's stack_size region, so the usable stack is stack_size minus
+ * SBI_SCRATCH_SIZE. The K3 stores a ~5.4 KiB IMSIC save area in scratch, which
+ * forces SBI_SCRATCH_SIZE to 0x2000; keep the vendor's 0x4000 stack so each
+ * HART still gets 8 KiB of real stack. At 0x2000 the scratch consumes the whole
+ * region, leaving zero stack, and the lowest-index HART (tp == _fw_end) grows
+ * its stack straight into the firmware image and takes an M-mode store fault.
+ */
+#define SBI_PLATFORM_DEFAULT_HART_STACK_SIZE	16384
 
 /** Platform default heap size */
 #define SBI_PLATFORM_DEFAULT_HEAP_SIZE(__num_hart)	\
