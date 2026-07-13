@@ -89,6 +89,9 @@ static void sbi_boot_print_general(struct sbi_scratch *scratch)
 	/* Platform details */
 	sbi_printf("Platform Name               : %s\n",
 		   sbi_platform_name(plat));
+	sbi_printf("MVENDORID                   : 0x%lx\n", csr_read(CSR_MVENDORID));
+	sbi_printf("MARCHID                     : 0x%lx\n", csr_read(CSR_MARCHID));
+	sbi_printf("MIMPID                      : 0x%lx\n", csr_read(CSR_MIMPID));
 	sbi_platform_get_features_str(plat, str, sizeof(str));
 	sbi_printf("Platform Features           : %s\n", str);
 	sbi_printf("Platform HART Count         : %u\n",
