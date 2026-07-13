@@ -14,6 +14,9 @@
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_version.h>
 #include <sbi/riscv_asm.h>
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+#include <spacemit/k3.h>
+#endif
 
 static int sbi_ecall_base_probe(unsigned long extid, unsigned long *out_val)
 {
@@ -64,6 +67,11 @@ static int sbi_ecall_base_handler(unsigned long extid, unsigned long funcid,
 	case SBI_EXT_BASE_PROBE_EXT:
 		ret = sbi_ecall_base_probe(regs->a0, &out->value);
 		break;
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+	case SBI_EXT_BASE_FLUSH_CACHE_ALL:
+		csi_flush_dcache_all();
+		break;
+#endif
 	default:
 		ret = SBI_ENOTSUPP;
 	}
