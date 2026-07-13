@@ -75,8 +75,12 @@ static void set_reg(struct uart8250_device *dev, u32 num, u32 val)
 
 void uart8250_device_putc(struct uart8250_device *dev, char ch)
 {
+	/* K3: bound the THRE poll so a wedged TX never hangs putc / SBI callers */
+	int timeout = 100000;
+
 	while ((get_reg(dev, UART_LSR_OFFSET) & UART_LSR_THRE) == 0)
-		;
+		if (--timeout <= 0)
+			break;
 
 	set_reg(dev, UART_THR_OFFSET, ch);
 }
