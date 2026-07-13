@@ -58,6 +58,13 @@
 	.globl _start
 	.globl _start_warm
 _start:
+	/*
+	 * Give the SoC time to settle after the SPL hand-off, before any
+	 * relocation. Do not remove: without this delay UFS DMA wedges later.
+	 */
+	li	t1, 0x400000
+4:	addi	t1, t1, -1
+	bnez	t1, 4b
 	/* Find preferred boot HART id */
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_boot_hart
