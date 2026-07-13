@@ -319,6 +319,11 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	rc = sbi_platform_early_init(plat, true);
 	if (rc)
 		sbi_hart_hang();
+	/*
+	 * Let the CCI-550 snoop/DVM and DMASYS setup done in early_init settle.
+	 * Do not remove: without it UFS (IO-coherent via CCI-550) DMA wedges.
+	 */
+	{ volatile int kd; for (kd = 0; kd < 0x200000; kd++) ; }
 
 	rc = sbi_pmu_init(scratch, true);
 	if (rc) {
