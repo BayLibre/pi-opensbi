@@ -173,6 +173,18 @@ static void mstatus_init(struct sbi_scratch *scratch)
 
 #undef __set_menvcfg_ext
 
+#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+		/*
+		 * The X100 kernel DT advertises Zicboz and the kernel uses cbo.zero
+		 * for clear_page, so S-mode needs menvcfg.CBZE. The gated enable
+		 * above keys off OpenSBI's control DTB, which intentionally does NOT
+		 * advertise zicboz -- that keeps U-Boot from issuing cbo.zero on its
+		 * UFS DMA buffers, which wedges the coherent UFS write. Force CBZE
+		 * here so the kernel's cbo.zero works while U-Boot stays clear of it.
+		 */
+		menvcfg_val |= ENVCFG_CBZE;
+#endif
+
 		csr_write64(CSR_MENVCFG, menvcfg_val);
 
 		/* Enable S-mode access to seed CSR */
