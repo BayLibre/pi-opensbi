@@ -15,6 +15,7 @@
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_string.h>
+#include <thead/c9xx_errata.h>
 #include <zhihe/teesmc_opteed.h>
 
 /* xuantie CSRS registers */
@@ -85,6 +86,8 @@ static void init_csrs(void)
 
 static bool zhihe_a210_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
 {
+	thead_register_tlb_flush_trap_handler();
+
 	if (hartid == 0)
 		return true;
 
