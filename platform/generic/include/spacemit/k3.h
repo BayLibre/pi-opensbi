@@ -112,9 +112,18 @@
  * when an enabled "spacemit,k3-rproc" FDT node confirms the layout is used.
  */
 #define RCPU0_RUNTIME_SPACE_BASE_ADDR		0x100200000UL
-#define RCPU0_RUNTIME_SPACE_SIZE		0x500000UL
+/*
+ * 4 MiB, not the full 5 MiB window: its last 16 KiB hold the RCPU resource
+ * table (rcpu0_rsc_table@1006fc000), which remoteproc reads from S-mode to
+ * attach to the firmware U-Boot has already started. Locking it with
+ * ENF_PERMISSIONS faults that read, so the coprocessor stays unusable and
+ * with it everything it arbitrates. The vendor firmware protects 4 MiB and
+ * its remoteproc attaches.
+ */
+#define RCPU0_RUNTIME_SPACE_SIZE		0x400000UL
 #define RCPU1_RUNTIME_SPACE_BASE_ADDR		0x100800000UL
-#define RCPU1_RUNTIME_SPACE_SIZE		0x500000UL
+/* Same 16 KiB tail: rcpu1_rsc_table@100cfc000. */
+#define RCPU1_RUNTIME_SPACE_SIZE		0x400000UL
 #define RCPU_DTB_SPACE_BASE_ADDR		0x100f00000UL
 #define RCPU_DTB_SPACE_SIZE			0x300000UL
 
