@@ -12,11 +12,14 @@
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/fdt/fdt_fixup.h>
 #include <sbi/sbi_ecall_interface.h>
+#include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_string.h>
 #include <thead/c9xx_errata.h>
 #include <zhihe/teesmc_opteed.h>
+
+extern struct sbi_platform platform;
 
 /* xuantie CSRS registers */
 #define CSR_SMPEN			0x7f3
@@ -82,6 +85,11 @@ static void init_csrs(void)
 		//csr_set(CSR_MHINT4, 1<<7);
 		//csr_set(CSR_MHINT4, 1<<28);
 	}
+}
+
+static void zhihe_a210_fw_init(const void *fdt, const struct fdt_match *match)
+{
+	platform.hart_stack_size = 32768;
 }
 
 static bool zhihe_a210_cold_boot_allowed(u32 hartid, const struct fdt_match *match)
@@ -386,6 +394,7 @@ static const struct fdt_match zhihe_a210_match[] = {
 
 const struct platform_override zhihe_a210 = {
 	.match_table		= zhihe_a210_match,
+	.fw_init		= zhihe_a210_fw_init,
 	.cold_boot_allowed 	= zhihe_a210_cold_boot_allowed,
 	.final_init		= zhihe_a210_final_init,
 	.extensions_init	= zhihe_a210_extensions_init,
