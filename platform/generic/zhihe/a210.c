@@ -12,6 +12,7 @@
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/fdt/fdt_fixup.h>
 #include <sbi/sbi_ecall_interface.h>
+#include <sbi/sbi_hart.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
 #include <sbi/sbi_error.h>
@@ -219,6 +220,12 @@ static const struct sbi_pmu_device zhihe_a210_pmu_device = {
 static int zhihe_a210_extensions_init(const struct fdt_match *match,
 					 struct sbi_hart_features *hfeatures)
 {
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+
+	/* The bootloader DT omits the CBO extensions implemented by both clusters. */
+	sbi_hart_update_extension(scratch, SBI_HART_EXT_ZICBOM, true);
+	sbi_hart_update_extension(scratch, SBI_HART_EXT_ZICBOZ, true);
+
 	// all cpu should initial PMU
 	// delegate PMU interrupt into S mode
 	csr_set(CSR_MIDELEG, 1 << 13);
