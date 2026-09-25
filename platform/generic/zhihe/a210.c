@@ -152,17 +152,9 @@ static struct sbi_domain *__get_udomain(void)
 	return NULL;
 }
 
-/*
- * if use S-mode register directly instead of stimecmp(CSR),
- * expect bit ENVCFG_STCE is 0
- */
 static int zhihe_a210_final_init(bool cold_boot, void *fdt,
 				   const struct fdt_match *match)
 {
-	uint64_t menvcfg_val = csr_read(CSR_MENVCFG);
-	menvcfg_val &= ~(ENVCFG_STCE);
-	csr_write(CSR_MENVCFG, menvcfg_val);
-
 	/* optee power on setup */
 	if (!cold_boot)
 		return zhihe_a210_cpu_on_process();
